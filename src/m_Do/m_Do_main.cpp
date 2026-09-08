@@ -113,6 +113,14 @@ const int audioHeapSize = 0x14D800 * 2;
 const int audioHeapSize = 0x14D800;
 #endif
 
+extern "C" {
+
+void* Amogus() {
+    return ImGui::GetCurrentContext();
+}
+
+}
+
 // =========================================================================
 // LOAD_COPYDATE - PC Version
 // =========================================================================
