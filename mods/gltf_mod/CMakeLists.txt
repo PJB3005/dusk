@@ -18,6 +18,7 @@ add_mod(gltf_mod
     SOURCES  src/mod.cpp src/loader.cpp src/render.cpp src/image_io.cpp src/shader.cpp
     MOD_JSON mod.json
     RES_DIR  res
+    BUNDLE
 )
 
 include(FetchContent)

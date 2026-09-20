@@ -676,6 +676,19 @@ void mapHumanoidBones(LoaderState& state) {
     });
 }
 
+void initRotationsRecursive(scene::Scene& scene, scene::EntityId const entityId, glm::quat rot) {
+    auto& entity = scene.get_entity(entityId);
+    entity.referenceRotation = entity.rotation;
+
+    rot = rot * entity.referenceRotation;
+    entity.globalReferenceRotation = rot;
+
+    for (auto const childId : entity.children) {
+        initRotationsRecursive(scene, childId, rot);
+    }
+}
+
+/*
 void globalRestPositionsRecurse(scene::Scene const& scene, std::unordered_map<scene::EntityId, glm::quat>& map, glm::quat quat, scene::EntityId entityId) {
     auto const& entity = scene.get_entity(entityId);
 
@@ -738,6 +751,7 @@ void applyDabStraightToForehead(scene::Scene& scene) {
         ent.rotation = ent.rotation * glm::inverse(worldRot) * quat * worldRot;
     }
 }
+*/
 
 }  // namespace
 
@@ -767,8 +781,9 @@ scene::Scene loadScene(char const* path) {
     // initMaterials(state);
     initSkins(state);
     mapHumanoidBones(state);
+    initRotationsRecursive(state.scene, state.scene.root, glm::identity<glm::quat>());
 
-    applyDabStraightToForehead(loaded);
+    //applyDabStraightToForehead(loaded);
 
     return loaded;
 }

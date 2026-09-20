@@ -67,8 +67,10 @@ struct Entity {
     glm::quat rotation = glm::identity<glm::quat>();
     glm::vec3 scale = glm::vec3(1.0f);
 
+    glm::quat referenceRotation = glm::identity<glm::quat>();
+    glm::quat globalReferenceRotation = glm::identity<glm::quat>();
+
     glm::mat4 localXform = glm::identity<glm::mat4>();
-    glm::mat4 realLocalXform = glm::identity<glm::mat4>();
     glm::mat4 globalXform = glm::identity<glm::mat4>();
 
     std::vector<EntityId> children;

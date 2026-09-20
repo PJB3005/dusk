@@ -25,12 +25,7 @@ struct LoadedResource {
 
     constexpr void ensure_ok() const { throw_for_result(result); }
 
-    constexpr std::span<uint8_t> span() noexcept {
-        auto base = static_cast<uint8_t*>(buffer.data);
-        return { base, base + buffer.size };
-    }
-
-    constexpr std::span<uint8_t const> span() const noexcept {
+    [[nodiscard]] constexpr std::span<uint8_t const> span() const noexcept {
         auto base = static_cast<uint8_t const*>(buffer.data);
         return { base, base + buffer.size };
     }
@@ -60,6 +55,14 @@ struct LoadedResource {
 
 [[nodiscard]] inline LoadedResource load(std::string const& relative_path) {
     return load(relative_path.c_str());
+}
+
+[[nodiscard]] inline bool file_exists(char const* relative_path) {
+    return svc_resource->file_exists(mod_ctx, relative_path);
+}
+
+[[nodiscard]] inline bool directory_exists(char const* relative_path) {
+    return svc_resource->directory_exists(mod_ctx, relative_path);
 }
 
 }  // namespace mods::resource

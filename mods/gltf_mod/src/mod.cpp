@@ -22,8 +22,13 @@
 #include "mods/svc/log.hpp"
 #include "mods/svc/resource.h"
 #include "mods/svc/stage.h"
+#include "mods/svc/hook.h"
+#include "mods/svc/hook.hpp"
 
 #include "webgpu/webgpu_cpp.h"
+#include <d/actor/d_a_alink.h>
+
+#include "mods/svc/ui.h"
 
 DEFINE_MOD();
 IMPORT_SERVICE(LogService, svc_log);
@@ -33,7 +38,12 @@ IMPORT_SERVICE(GfxService, svc_gfx);
 IMPORT_SERVICE(ResourceService, svc_resource);
 IMPORT_SERVICE(CameraService, svc_camera);
 IMPORT_SERVICE(HookService, svc_hook);
+IMPORT_SERVICE(ConfigService, svc_config);
+IMPORT_SERVICE(UiService, svc_ui);
 
+DEFINE_HOOK(&daAlink_c::basicModelDraw, LinkBasicModelDraw);
+DEFINE_HOOK(&daAlink_c::modelDraw, LinkDraw);
+DEFINE_HOOK_SYMBOL("daAlink_modelCallBack", int(J3DJoint* i_joint, int param_1), ModelCallback);
 DEFINE_HOOK_SYMBOL("mDoGph_Painter", int(), OnPaint);
 DEFINE_HOOK_SYMBOL("dusk::ImGuiMenuTools::draw", void(), OnMenu);
 
@@ -49,6 +59,8 @@ extern void* Amogus();
 }
 
 namespace {
+
+UiElementHandle statusText1 = 0;
 
 struct Payload {
     std::shared_ptr<Scene> scene;
@@ -224,13 +236,53 @@ glm::mat4 calcLocalTransform(Entity const& entity) {
            glm::scale(entity.scale);
 }
 
-void applyTransformsRecursive(Scene& scene, EntityId entity_id, glm::mat4 const& transform) {
+std::pair<std::string, u16> const vrmBonesToLinkJoints[] {
+    {"rightShoulder"s, 0x0B},
+    {"rightUpperArm"s, 0x0C},
+    {"rightLowerArm"s, 0x0D},
+    {"rightHand"s, 0x0E},
+};
+
+//std::vector<struct >
+
+void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (!link || !actorGltf.linkCopyModel) {
+        return;
+    }
+
+    for (const auto& [humanoidBone, linkJoint] : vrmBonesToLinkJoints) {
+        auto const foundEnt = scene.humanoidBones.find(humanoidBone);
+        if (foundEnt == scene.humanoidBones.end()) {
+            continue;
+        }
+
+        auto& entity = scene.get_entity(foundEnt->second);
+
+        auto& origJoint = *actorGltf.linkCopyModel->getModelData()->getJointNodePointer(linkJoint);
+        auto const& origTransformInfo = origJoint.getTransformInfo();
+
+        auto origRotation = glm::quat({origTransformInfo.mRotation.x / 32768, origTransformInfo.mRotation.y / 32768, origTransformInfo.mRotation.z / 32768});
+
+        glm::mat4 tposeMtx =
+            slugcat::gltf::matrix::fromDolphinMtx(actorGltf.linkCopyModel->getAnmMtx(linkJoint));
+        glm::mat4 animatedMtx =
+            slugcat::gltf::matrix::fromDolphinMtx(link->mpLinkModel->getAnmMtx(linkJoint));
+        glm::mat4 offsetMtx = tposeMtx * glm::inverse(animatedMtx);
+        auto offsetQuat = glm::toQuat(offsetMtx);
+
+        entity.rotation = entity.referenceRotation * glm::inverse(entity.globalReferenceRotation) * offsetQuat * entity.globalReferenceRotation;
+    }
+}
+
+void applyTransformsRecursive(
+    Scene& scene, EntityId entity_id, glm::mat4 const& transform, ActorGltf* actorGltf) {
     auto& entity = scene.get_entity(entity_id);
     entity.localXform = calcLocalTransform(entity);
     entity.globalXform = transform * entity.localXform;
 
     for (auto child : entity.children) {
-        applyTransformsRecursive(scene, child, entity.globalXform);
+        applyTransformsRecursive(scene, child, entity.globalXform, actorGltf);
     }
 }
 
@@ -256,8 +308,6 @@ void show_entity(Scene& scene, EntityId idx) {
 
     ImGui::PopID();
 }
-
-void applyDabStraightToForehead(Scene& scene);
 
 void show_scene(Scene& scene) {
     if (ImGui::BeginChild("##tree", ImVec2(300, 0),
@@ -301,94 +351,8 @@ void show_scene(Scene& scene) {
         }
     }
 
-    /*
-    {
-        auto helpCopy = glm::transpose(scene.sendHelp);
-
-        bool changed = false;
-        changed |= ImGui::InputFloat4("R0", &helpCopy[0].x);
-        changed |= ImGui::InputFloat4("R1", &helpCopy[1].x);
-        changed |= ImGui::InputFloat4("R2", &helpCopy[2].x);
-        changed |= ImGui::InputFloat4("R3", &helpCopy[3].x);
-
-        if (changed) {
-            scene.sendHelp = glm::transpose(helpCopy);
-            applyDabStraightToForehead(scene);
-        }
-    }
-    */
-
     ImGui::EndGroup();
 }
-
-/*using namespace slugcat::gltf;
-
-std::unordered_map<std::string, glm::quat> loadRotations(char const* path) {
-    std::ifstream f(path);
-    nlohmann::json data = nlohmann::json::parse(f);
-
-    decltype(loadRotations(nullptr)) real;
-
-    for (auto& element : data.items()) {
-        auto const& key = element.key();
-        auto const& value = element.value();
-
-        auto const quat = glm::quat(
-            value[3],
-            value[0],
-            value[1],
-            value[2]
-        );
-
-        real.emplace(key, quat);
-    }
-
-    return real;
-}
-
-auto wawaRots = loadRotations(R"(E:\Projects\dusk\wawa.json)");
-auto realRots = loadRotations(R"(E:\Projects\dusk\dab.json)");
-
-void applyDabStraightToForehead(scene::Scene& scene) {
-
-    std::unordered_map<std::string, scene::EntityId> entityNames;
-
-    for (scene::EntityId entId = 0; entId < scene.entities.size(); entId++) {
-        auto const& entity = scene.get_entity(entId);
-        entityNames.emplace(entity.name, entId);
-    }
-
-    for (auto const& [key, theRot] : realRots) {
-        auto const foundEntity = entityNames.find(key);
-        if (foundEntity == entityNames.end()) {
-            continue;
-        }
-
-        auto const consumes = wawaRots[key];
-
-        // if (!(key == "Spine"sv || key == "Armature"sv || key == "Hips"sv)) {
-        //     continue;
-        // }
-
-        auto finalRot = glm::inverse(consumes) * theRot;
-
-        auto quaToVec = glm::vec4(finalRot.x, finalRot.y, finalRot.z, finalRot.w);
-        quaToVec = scene.sendHelp * quaToVec;
-
-        finalRot = {
-            quaToVec.w,
-            quaToVec.x,
-            quaToVec.y,
-            quaToVec.z,
-        };
-
-        auto& entity = scene.get_entity(foundEntity->second);
-        auto mat = glm::mat4_cast(finalRot);
-        // auto euler = glm::eulerAngles(finalRot) * (180 / std::numbers::pi_v<float>);
-        entity.localXform = entity.realLocalXform * mat;
-    }
-}*/
-
 
 bool active;
 
@@ -417,6 +381,33 @@ void on_interp_view(ModContext*, void*, void*, void*) {
         idx += 1;
     }
 }
+
+constexpr ConfigVarDesc cVarVrmPathDesc {
+    .struct_size = sizeof(cVarVrmPathDesc),
+    .name = "vrm_path",
+    .type = CONFIG_VAR_STRING,
+};
+
+ConfigVarHandle cVarPathHandle;
+
+ModResult build(ModContext*, UiElementHandle panel, void*, ModError*) {
+    svc_ui->pane_add_section(mod_ctx, panel, "Settings");
+
+    UiControlDesc control1 = UI_CONTROL_DESC_INIT;
+    control1.kind = UI_CONTROL_FILE_PICKER;
+    control1.label = "Path";
+    control1.help_rml = "Path to .vrm";
+    control1.binding = UI_BINDING_CONFIG_VAR;
+    control1.config_var = cVarPathHandle;
+    svc_ui->pane_add_control(mod_ctx, panel, &control1, &statusText1);
+
+    return MOD_OK;
+}
+
+ModResult update(ModContext*, void*, ModError*) {
+    return MOD_OK;
+}
+
 }  // namespace
 
 FoobarPacket::FoobarPacket() {
@@ -583,18 +574,61 @@ void FoobarPacket::draw() {
     }
 }
 
+HookAction on_link_model_callback_pre(ModContext*, void* args, void*, void*) {
+    return HOOK_SKIP_ORIGINAL;
+}
+
+HookAction on_link_draw_pre(ModContext*, void* args, void*, void*) {
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (!link || link->checkWolf() || link->mClothesChangeWaitTimer != 0) {
+        return HOOK_CONTINUE;
+    }
+
+    J3DModel* i_model = mods::arg<J3DModel*>(args, 1);
+    if (i_model == link->mpLinkModel || i_model == link->mpLinkHatModel ||
+        i_model == link->mpLinkHandModel || i_model == link->mpLinkFaceModel ||
+        i_model == link->mpDemoFCBlendModel || i_model == link->mpDemoFCTongueModel ||
+        i_model == link->mpDemoHLTmpModel || i_model == link->mpDemoHRTmpModel)
+    {
+        return HOOK_SKIP_ORIGINAL;
+    }
+    return HOOK_CONTINUE;
+}
+
+HookAction on_link_basic_model_draw_pre(ModContext* ctx, void* args, void*, void*) {
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (!link || link->checkWolf()) {
+        return HOOK_CONTINUE;
+    }
+
+    J3DModel* i_model = mods::arg<J3DModel*>(args, 1);
+    if (i_model == link->mpLinkModel || i_model == link->mpLinkHatModel ||
+        i_model == link->mpLinkHandModel || i_model == link->mpLinkFaceModel)
+    {
+        return HOOK_SKIP_ORIGINAL;
+    }
+
+    return HOOK_CONTINUE;
+}
+
 cPhs_Step ActorGltf::Create() {
     AuroraGXSync();
 
-    scale.setall(1'000);
+    scale.setall(100);
 
-    packet.renderData = std::make_shared<Scene>(
-        slugcat::gltf::loader::loadScene(R"(E:\Projects\VRChatProjects\Xiaomao3.vrm)"));
-    //    R"(C:\Program Files (x86)\Steam\steamapps\common\Lethal
-    //    Company\VRMs\76561198110450751.vrm)"));
-    // R"(D:\Downloads\Melon VRM1.vrm)"));
+    size_t length;
+    checkResult(svc_config->get_string(mod_ctx, cVarPathHandle, nullptr, 0, &length));
+    std::string buf;
+    buf.resize(length);
+    checkResult(svc_config->get_string(mod_ctx, cVarPathHandle, buf.data(), buf.size() + 1, nullptr));
 
-    // applyDabStraightToForehead(*packet.renderData);
+    try {
+        packet.renderData = std::make_shared<Scene>(
+            slugcat::gltf::loader::loadScene(buf.c_str()));
+    } catch (std::runtime_error const& e) {
+        mods::log::error("Failed to load VRM '{}': {}", buf, e.what());
+        return cPhs_ERROR_e;
+    }
 
     actors.push_back(this);
 
@@ -615,10 +649,18 @@ int ActorGltf::Execute() {
     mDoMtx_stack_c::ZXYrotM(shape_angle);
     mDoMtx_stack_c::scaleM(scale);
 
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (link && link->mpLinkModel && !this->linkCopyModel) {
+        this->linkCopyModel =
+            link->initModel(static_cast<J3DModelData*>(dComIfG_getObjectRes("Kmdl", "al.bmd")), 0);
+        link->modelCalc(this->linkCopyModel);
+    }
+
     auto mtx = mDoMtx_stack_c::get();
     auto glmMtx = slugcat::gltf::matrix::fromDolphinMtx(mtx);
 
-    applyTransformsRecursive(*packet.renderData, packet.renderData->root, glmMtx);
+    applyTransformsRecursive(*packet.renderData, packet.renderData->root, glmMtx, this);
+    applyLinkPose(*packet.renderData, *this);
 
     return 1;
 }
@@ -630,7 +672,10 @@ int ActorGltf::Draw() {
 }
 
 ActorGltf::~ActorGltf() {
-    actors.erase(std::ranges::find(actors, this));
+    auto const pos = std::ranges::find(actors, this);
+    if (pos != actors.end()) {
+        actors.erase(pos);
+    }
 }
 
 s16 ActorGltf::sProcName = -1;
@@ -648,6 +693,10 @@ extern "C" {
 
 MOD_EXPORT ModResult mod_initialize(ModError*) {
     slugcat::gltf::render::init();
+
+    mods::hook::add_pre<LinkBasicModelDraw>(on_link_basic_model_draw_pre);
+    mods::hook::add_pre<LinkDraw>(on_link_draw_pre);
+    mods::hook::add_pre<ModelCallback>(on_link_model_callback_pre);
 
     constexpr static GfxDrawTypeDesc drawDesc = {
         .struct_size = sizeof(GfxDrawTypeDesc),
@@ -687,8 +736,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
         return MOD_ERROR;
     }
 
+    checkResult(svc_config->register_var(mod_ctx, &cVarVrmPathDesc, &cVarPathHandle));
+
     checkResult(mods::hook::add_post<OnPaint>(svc_hook, on_interp_view));
     //checkResult(mods::hook::add_post<OnMenu>(svc_hook, on_menu));
+
+    UiModsPanelDesc panel = UI_MODS_PANEL_DESC_INIT;
+    panel.build = build;
+    checkResult(svc_ui->register_mods_panel(mod_ctx, &panel));
 
     return MOD_OK;
 }
