@@ -41,9 +41,6 @@ IMPORT_SERVICE(HookService, svc_hook);
 IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
 
-DEFINE_HOOK(&daAlink_c::basicModelDraw, LinkBasicModelDraw);
-DEFINE_HOOK(&daAlink_c::modelDraw, LinkDraw);
-DEFINE_HOOK_SYMBOL("daAlink_modelCallBack", int(J3DJoint* i_joint, int param_1), ModelCallback);
 DEFINE_HOOK_SYMBOL("mDoGph_Painter", int(), OnPaint);
 DEFINE_HOOK_SYMBOL("dusk::ImGuiMenuTools::draw", void(), OnMenu);
 
@@ -247,7 +244,7 @@ std::pair<std::string, u16> const vrmBonesToLinkJoints[] {
 
 void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
     daAlink_c* link = daAlink_getAlinkActorClass();
-    if (!link || !actorGltf.linkCopyModel) {
+    if (!link) {
         return;
     }
 
@@ -259,15 +256,16 @@ void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
 
         auto& entity = scene.get_entity(foundEnt->second);
 
-        auto& origJoint = *actorGltf.linkCopyModel->getModelData()->getJointNodePointer(linkJoint);
+        auto& origJoint = *link->mpLinkModel->getModelData()->getJointNodePointer(linkJoint);
         auto const& origTransformInfo = origJoint.getTransformInfo();
 
         auto origRotation = glm::quat({origTransformInfo.mRotation.x / 32768, origTransformInfo.mRotation.y / 32768, origTransformInfo.mRotation.z / 32768});
 
         glm::mat4 tposeMtx =
-            slugcat::gltf::matrix::fromDolphinMtx(actorGltf.linkCopyModel->getAnmMtx(linkJoint));
+            slugcat::gltf::matrix::fromDolphinMtx(link->mpLinkModel->getAnmMtx(linkJoint));
         glm::mat4 animatedMtx =
             slugcat::gltf::matrix::fromDolphinMtx(link->mpLinkModel->getAnmMtx(linkJoint));
+
         glm::mat4 offsetMtx = tposeMtx * glm::inverse(animatedMtx);
         auto offsetQuat = glm::toQuat(offsetMtx);
 
@@ -574,43 +572,6 @@ void FoobarPacket::draw() {
     }
 }
 
-HookAction on_link_model_callback_pre(ModContext*, void* args, void*, void*) {
-    return HOOK_SKIP_ORIGINAL;
-}
-
-HookAction on_link_draw_pre(ModContext*, void* args, void*, void*) {
-    daAlink_c* link = daAlink_getAlinkActorClass();
-    if (!link || link->checkWolf() || link->mClothesChangeWaitTimer != 0) {
-        return HOOK_CONTINUE;
-    }
-
-    J3DModel* i_model = mods::arg<J3DModel*>(args, 1);
-    if (i_model == link->mpLinkModel || i_model == link->mpLinkHatModel ||
-        i_model == link->mpLinkHandModel || i_model == link->mpLinkFaceModel ||
-        i_model == link->mpDemoFCBlendModel || i_model == link->mpDemoFCTongueModel ||
-        i_model == link->mpDemoHLTmpModel || i_model == link->mpDemoHRTmpModel)
-    {
-        return HOOK_SKIP_ORIGINAL;
-    }
-    return HOOK_CONTINUE;
-}
-
-HookAction on_link_basic_model_draw_pre(ModContext* ctx, void* args, void*, void*) {
-    daAlink_c* link = daAlink_getAlinkActorClass();
-    if (!link || link->checkWolf()) {
-        return HOOK_CONTINUE;
-    }
-
-    J3DModel* i_model = mods::arg<J3DModel*>(args, 1);
-    if (i_model == link->mpLinkModel || i_model == link->mpLinkHatModel ||
-        i_model == link->mpLinkHandModel || i_model == link->mpLinkFaceModel)
-    {
-        return HOOK_SKIP_ORIGINAL;
-    }
-
-    return HOOK_CONTINUE;
-}
-
 cPhs_Step ActorGltf::Create() {
     AuroraGXSync();
 
@@ -649,13 +610,6 @@ int ActorGltf::Execute() {
     mDoMtx_stack_c::ZXYrotM(shape_angle);
     mDoMtx_stack_c::scaleM(scale);
 
-    daAlink_c* link = daAlink_getAlinkActorClass();
-    if (link && link->mpLinkModel && !this->linkCopyModel) {
-        this->linkCopyModel =
-            link->initModel(static_cast<J3DModelData*>(dComIfG_getObjectRes("Kmdl", "al.bmd")), 0);
-        link->modelCalc(this->linkCopyModel);
-    }
-
     auto mtx = mDoMtx_stack_c::get();
     auto glmMtx = slugcat::gltf::matrix::fromDolphinMtx(mtx);
 
@@ -693,10 +647,6 @@ extern "C" {
 
 MOD_EXPORT ModResult mod_initialize(ModError*) {
     slugcat::gltf::render::init();
-
-    mods::hook::add_pre<LinkBasicModelDraw>(on_link_basic_model_draw_pre);
-    mods::hook::add_pre<LinkDraw>(on_link_draw_pre);
-    mods::hook::add_pre<ModelCallback>(on_link_model_callback_pre);
 
     constexpr static GfxDrawTypeDesc drawDesc = {
         .struct_size = sizeof(GfxDrawTypeDesc),

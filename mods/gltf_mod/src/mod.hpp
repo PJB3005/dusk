@@ -46,6 +46,4 @@ public:
     static s16 sProcName;
     static ActorHandle sActorHandle;
     static const ActorProfileDesc sProfile;
-
-    J3DModel* linkCopyModel;
 };
