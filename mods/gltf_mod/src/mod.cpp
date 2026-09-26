@@ -30,6 +30,8 @@
 
 #include "mods/svc/ui.h"
 
+#include "dusk/interp/frame_interpolation.h"
+
 DEFINE_MOD();
 IMPORT_SERVICE(LogService, svc_log);
 IMPORT_SERVICE(ActorService, svc_actor);
@@ -237,13 +239,111 @@ glm::mat4 calcLocalTransform(Entity const& entity) {
 }
 
 std::pair<std::string, u16> const vrmBonesToLinkJoints[] {
+    {"spine"s, 0x01}, // backbone1
+    {"chest"s, 0x02}, // backbone2
+    {"neck"s, 0x03},
+    {"head"s, 0x04},
+    {"leftShoulder"s, 0x06},
+    {"leftUpperArm"s, 0x07},
+    {"leftLowerArm"s, 0x08},
+    {"leftHand"s, 0x09},
     {"rightShoulder"s, 0x0B},
     {"rightUpperArm"s, 0x0C},
     {"rightLowerArm"s, 0x0D},
     {"rightHand"s, 0x0E},
+    {"hips"s, 0x10}, // waist
+    {"leftUpperLeg"s, 0x12},
+    {"leftLowerLeg"s, 0x13},
+    {"leftFoot"s, 0x14},
+    {"rightUpperLeg"s, 0x17},
+    {"rightLowerLeg"s, 0x18},
+    {"rightFoot"s, 0x19},
 };
 
-//std::vector<struct >
+struct RotationPair {
+    glm::quat local = glm::identity<glm::quat>();
+    glm::quat global = glm::identity<glm::quat>();
+};
+
+glm::quat getRotationFromTransformInfo(J3DTransformInfo const& transformInfo) {
+    Quaternion q;
+    JMAEulerToQuat(transformInfo.mRotation.x, transformInfo.mRotation.y, transformInfo.mRotation.z, &q);
+
+    return glm::quat(q.w, q.x, q.y, q.z);
+}
+
+void getRestLocalRotationsRecursive(
+    std::vector<RotationPair>& rotations,
+    glm::quat const& currentRotation,
+    J3DJoint* joint) {
+    if (!joint) {
+        return;
+    }
+
+    auto const localRot = getRotationFromTransformInfo(joint->getTransformInfo());
+    auto const newCurrent = currentRotation * localRot;
+
+    rotations.at(joint->getJntNo()) = { localRot, newCurrent };
+
+    getRestLocalRotationsRecursive(rotations, newCurrent, joint->getChild());
+
+    // Tail call 🙏
+    getRestLocalRotationsRecursive(rotations, currentRotation, joint->getYounger());
+}
+
+std::vector<RotationPair> getRestRotations(J3DModelData* modelData) {
+    std::vector<RotationPair> rotations;
+    rotations.resize(modelData->getJointNum());
+
+    getRestLocalRotationsRecursive(
+        rotations,
+        glm::identity<glm::quat>(),
+        modelData->getJointTree().getRootNode());
+
+    return rotations;
+}
+
+void getLocalRotationsRecursive(
+    std::vector<glm::quat>& rotations,
+    J3DModel* model,
+    glm::mat4 const& parentMtx,
+    J3DJoint* joint) {
+    if (!joint) {
+        return;
+    }
+
+    auto const anmMtx = slugcat::gltf::matrix::fromDolphinMtx(model->getAnmMtx(joint->getJntNo()));
+
+    auto const localMtx = glm::inverse(parentMtx) * anmMtx;
+
+    glm::vec3 scale;
+    glm::quat rotation;
+    glm::vec3 translation;
+    glm::vec3 skew;
+    glm::vec4 perspective;
+
+    glm::decompose(localMtx, scale, rotation, translation, skew, perspective);
+
+    rotations.at(joint->getJntNo()) = rotation;
+
+    getLocalRotationsRecursive(rotations, model, anmMtx, joint->getChild());
+
+    // Tail call 🙏
+    getLocalRotationsRecursive(rotations, model, parentMtx, joint->getYounger());
+}
+
+std::vector<glm::quat> getLocalRotations(J3DModel* model) {
+    std::vector<glm::quat> rotations;
+    rotations.resize(model->mModelData->getJointNum());
+
+    getLocalRotationsRecursive(
+        rotations,
+        model,
+        glm::identity<glm::mat4>(),
+        model->mModelData->getJointTree().getRootNode());
+
+    return rotations;
+}
 
 void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
     daAlink_c* link = daAlink_getAlinkActorClass();
@@ -251,15 +351,27 @@ void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
         return;
     }
 
+    auto a = dusk::interp::is_enabled();
+
+    auto const localRotations = getLocalRotations(link->mpLinkModel);
+    auto const restRotations = getRestRotations(link->mpLinkModel->getModelData());
+
     for (const auto& [humanoidBone, linkJoint] : vrmBonesToLinkJoints) {
         auto const foundEnt = scene.humanoidBones.find(humanoidBone);
         if (foundEnt == scene.humanoidBones.end()) {
             continue;
         }
 
+        auto& origJoint = *actorGltf.linkCopyModel->getModelData()->getJointNodePointer(linkJoint);
+
+        auto const& localRotJoint = localRotations.at(origJoint.getJntNo());
+        auto const& restRotJoint = restRotations.at(origJoint.getJntNo());
+
         auto& entity = scene.get_entity(foundEnt->second);
 
-        auto& origJoint = *actorGltf.linkCopyModel->getModelData()->getJointNodePointer(linkJoint);
+        auto poseNormalized = restRotJoint.global * glm::inverse(restRotJoint.local) * localRotJoint * glm::inverse(restRotJoint.global);
+
+        /*
         auto const& origTransformInfo = origJoint.getTransformInfo();
 
         auto origRotation = glm::quat({origTransformInfo.mRotation.x / 32768, origTransformInfo.mRotation.y / 32768, origTransformInfo.mRotation.z / 32768});
@@ -269,9 +381,9 @@ void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
         glm::mat4 animatedMtx =
             slugcat::gltf::matrix::fromDolphinMtx(link->mpLinkModel->getAnmMtx(linkJoint));
         glm::mat4 offsetMtx = tposeMtx * glm::inverse(animatedMtx);
-        auto offsetQuat = glm::toQuat(offsetMtx);
+        auto offsetQuat = glm::toQuat(offsetMtx);*/
 
-        entity.rotation = entity.referenceRotation * glm::inverse(entity.globalReferenceRotation) * offsetQuat * entity.globalReferenceRotation;
+        entity.rotation = entity.referenceRotation * glm::inverse(entity.globalReferenceRotation) * poseNormalized * entity.globalReferenceRotation;
     }
 }
 
@@ -584,6 +696,7 @@ HookAction on_link_draw_pre(ModContext*, void* args, void*, void*) {
         return HOOK_CONTINUE;
     }
 
+    /*
     J3DModel* i_model = mods::arg<J3DModel*>(args, 1);
     if (i_model == link->mpLinkModel || i_model == link->mpLinkHatModel ||
         i_model == link->mpLinkHandModel || i_model == link->mpLinkFaceModel ||
@@ -592,6 +705,7 @@ HookAction on_link_draw_pre(ModContext*, void* args, void*, void*) {
     {
         return HOOK_SKIP_ORIGINAL;
     }
+    */
     return HOOK_CONTINUE;
 }
 
@@ -614,7 +728,7 @@ HookAction on_link_basic_model_draw_pre(ModContext* ctx, void* args, void*, void
 cPhs_Step ActorGltf::Create() {
     AuroraGXSync();
 
-    scale.setall(100);
+    scale.setall(150);
 
     size_t length;
     checkResult(svc_config->get_string(mod_ctx, cVarPathHandle, nullptr, 0, &length));
