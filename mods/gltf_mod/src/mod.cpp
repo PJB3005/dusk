@@ -767,6 +767,11 @@ int ActorGltf::Execute() {
 }
 
 int ActorGltf::Draw() {
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (link && link->checkPlayerNoDraw()) {
+        return 0;
+    }
+
     dComIfGd_getOpaList()->entryImm(&packet, 0);
 
     return 1;
