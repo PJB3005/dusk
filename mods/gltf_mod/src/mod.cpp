@@ -30,8 +30,6 @@
 
 #include "mods/svc/ui.h"
 
-#include "dusk/interp/frame_interpolation.h"
-
 DEFINE_MOD();
 IMPORT_SERVICE(LogService, svc_log);
 IMPORT_SERVICE(ActorService, svc_actor);
@@ -347,11 +345,9 @@ std::vector<glm::quat> getLocalRotations(J3DModel* model) {
 
 void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
     daAlink_c* link = daAlink_getAlinkActorClass();
-    if (!link || !actorGltf.linkCopyModel) {
+    if (!link) {
         return;
     }
-
-    auto a = dusk::interp::is_enabled();
 
     auto const localRotations = getLocalRotations(link->mpLinkModel);
     auto const restRotations = getRestRotations(link->mpLinkModel->getModelData());
@@ -362,7 +358,7 @@ void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
             continue;
         }
 
-        auto& origJoint = *actorGltf.linkCopyModel->getModelData()->getJointNodePointer(linkJoint);
+        auto& origJoint = *link->mpLinkModel->getModelData()->getJointNodePointer(linkJoint);
 
         auto const& localRotJoint = localRotations.at(origJoint.getJntNo());
         auto const& restRotJoint = restRotations.at(origJoint.getJntNo());
@@ -763,13 +759,6 @@ int ActorGltf::Execute() {
     mDoMtx_stack_c::ZXYrotM(shape_angle);
     mDoMtx_stack_c::scaleM(scale);
 
-    daAlink_c* link = daAlink_getAlinkActorClass();
-    if (link && link->mpLinkModel && !this->linkCopyModel) {
-        this->linkCopyModel =
-            link->initModel(static_cast<J3DModelData*>(dComIfG_getObjectRes("Kmdl", "al.bmd")), 0);
-        link->modelCalc(this->linkCopyModel);
-    }
-
     auto mtx = mDoMtx_stack_c::get();
     auto glmMtx = slugcat::gltf::matrix::fromDolphinMtx(mtx);
 
@@ -808,9 +797,9 @@ extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
     slugcat::gltf::render::init();
 
-    mods::hook::add_pre<LinkBasicModelDraw>(on_link_basic_model_draw_pre);
-    mods::hook::add_pre<LinkDraw>(on_link_draw_pre);
-    mods::hook::add_pre<ModelCallback>(on_link_model_callback_pre);
+    //mods::hook::add_pre<LinkBasicModelDraw>(on_link_basic_model_draw_pre);
+    //mods::hook::add_pre<LinkDraw>(on_link_draw_pre);
+    //mods::hook::add_pre<ModelCallback>(on_link_model_callback_pre);
 
     constexpr static GfxDrawTypeDesc drawDesc = {
         .struct_size = sizeof(GfxDrawTypeDesc),
