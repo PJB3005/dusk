@@ -41,11 +41,11 @@ IMPORT_SERVICE(HookService, svc_hook);
 IMPORT_SERVICE(ConfigService, svc_config);
 IMPORT_SERVICE(UiService, svc_ui);
 
-DEFINE_HOOK(&daAlink_c::basicModelDraw, LinkBasicModelDraw);
-DEFINE_HOOK(&daAlink_c::modelDraw, LinkDraw);
 DEFINE_HOOK_SYMBOL("daAlink_modelCallBack", int(J3DJoint* i_joint, int param_1), ModelCallback);
 DEFINE_HOOK_SYMBOL("mDoGph_Painter", int(), OnPaint);
 DEFINE_HOOK_SYMBOL("dusk::ImGuiMenuTools::draw", void(), OnMenu);
+
+DEFINE_HOOK(&daAlink_c::createHeap, LinkCreateHeap);
 
 using namespace mods::actor;
 using namespace std::string_view_literals;
@@ -61,6 +61,7 @@ extern void* Amogus();
 namespace {
 
 UiElementHandle statusText1 = 0;
+UiElementHandle statusText2 = 0;
 
 struct Payload {
     std::shared_ptr<Scene> scene;
@@ -498,6 +499,15 @@ constexpr ConfigVarDesc cVarVrmPathDesc {
 
 ConfigVarHandle cVarPathHandle;
 
+constexpr ConfigVarDesc cVarVrmScaleDesc{
+    .struct_size = sizeof(cVarVrmScaleDesc),
+    .name = "vrm_scale",
+    .type = CONFIG_VAR_INT,
+    .default_int = 100,
+};
+
+ConfigVarHandle cVarVrmScaleHandle;
+
 ModResult build(ModContext*, UiElementHandle panel, void*, ModError*) {
     svc_ui->pane_add_section(mod_ctx, panel, "Settings");
 
@@ -508,6 +518,17 @@ ModResult build(ModContext*, UiElementHandle panel, void*, ModError*) {
     control1.binding = UI_BINDING_CONFIG_VAR;
     control1.config_var = cVarPathHandle;
     svc_ui->pane_add_control(mod_ctx, panel, &control1, &statusText1);
+
+    UiControlDesc control2 = UI_CONTROL_DESC_INIT;
+    control2.kind = UI_CONTROL_NUMBER;
+    control2.label = "VRM Scale";
+    control2.help_rml = "Scale of the VRM in the world";
+    control2.binding = UI_BINDING_CONFIG_VAR;
+    control2.config_var = cVarVrmScaleHandle;
+    control2.min = 1;
+    control2.max = 1000;
+    control2.step = 1;
+    svc_ui->pane_add_control(mod_ctx, panel, &control2, &statusText2);
 
     return MOD_OK;
 }
@@ -682,42 +703,8 @@ void FoobarPacket::draw() {
     }
 }
 
-HookAction on_link_model_callback_pre(ModContext*, void* args, void*, void*) {
-    return HOOK_SKIP_ORIGINAL;
-}
-
-HookAction on_link_draw_pre(ModContext*, void* args, void*, void*) {
-    daAlink_c* link = daAlink_getAlinkActorClass();
-    if (!link || link->checkWolf() || link->mClothesChangeWaitTimer != 0) {
-        return HOOK_CONTINUE;
-    }
-
-    /*
-    J3DModel* i_model = mods::arg<J3DModel*>(args, 1);
-    if (i_model == link->mpLinkModel || i_model == link->mpLinkHatModel ||
-        i_model == link->mpLinkHandModel || i_model == link->mpLinkFaceModel ||
-        i_model == link->mpDemoFCBlendModel || i_model == link->mpDemoFCTongueModel ||
-        i_model == link->mpDemoHLTmpModel || i_model == link->mpDemoHRTmpModel)
-    {
-        return HOOK_SKIP_ORIGINAL;
-    }
-    */
-    return HOOK_CONTINUE;
-}
-
-HookAction on_link_basic_model_draw_pre(ModContext* ctx, void* args, void*, void*) {
-    daAlink_c* link = daAlink_getAlinkActorClass();
-    if (!link || link->checkWolf()) {
-        return HOOK_CONTINUE;
-    }
-
-    J3DModel* i_model = mods::arg<J3DModel*>(args, 1);
-    if (i_model == link->mpLinkModel || i_model == link->mpLinkHatModel ||
-        i_model == link->mpLinkHandModel || i_model == link->mpLinkFaceModel)
-    {
-        return HOOK_SKIP_ORIGINAL;
-    }
-
+HookAction link_create_heap(ModContext*, void* args, void*, void*) {
+    fopAcM_Create(ActorGltf::sProcName, 0, 0);
     return HOOK_CONTINUE;
 }
 
@@ -742,6 +729,8 @@ cPhs_Step ActorGltf::Create() {
 
     actors.push_back(this);
 
+    fopAcM_setStageLayer(this);
+
     return cPhs_COMPLEATE_e;
 }
 
@@ -755,9 +744,18 @@ int ActorGltf::IsDelete() {
 }
 
 int ActorGltf::Execute() {
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (link) {
+        this->current.pos = link->current.pos;
+        this->current.angle = link->current.angle;
+    }
+
     mDoMtx_stack_c::transS(current.pos.x, current.pos.y, current.pos.z);
     mDoMtx_stack_c::ZXYrotM(shape_angle);
-    mDoMtx_stack_c::scaleM(scale);
+
+    int64_t scalePercent = 100;
+    checkResult(svc_config->get_int(mod_ctx, cVarVrmScaleHandle, &scalePercent));
+    mDoMtx_stack_c::scaleM(scale * (scalePercent / 100.0f));
 
     auto mtx = mDoMtx_stack_c::get();
     auto glmMtx = slugcat::gltf::matrix::fromDolphinMtx(mtx);
@@ -785,9 +783,9 @@ s16 ActorGltf::sProcName = -1;
 ActorHandle ActorGltf::sActorHandle = -1;
 ActorProfileDesc const ActorGltf::sProfile = FillInfo<ActorGltf>({
     .name = ACTOR_GLTF_NAME,
-    .priority_group = 7,
+    .priority_group = 11,
     .draw_priority = fpcDwPi_OBJ_LBOX_e,
-    .status = 0,
+    .status = fopAcStts_UNK_0x40000_e | fopAcStts_NOPAUSE_e,
     .group = fopAc_ACTOR_e,
     .cull_type = fopAc_CULLBOX_CUSTOM_e,
 });
@@ -797,9 +795,7 @@ extern "C" {
 MOD_EXPORT ModResult mod_initialize(ModError*) {
     slugcat::gltf::render::init();
 
-    //mods::hook::add_pre<LinkBasicModelDraw>(on_link_basic_model_draw_pre);
-    //mods::hook::add_pre<LinkDraw>(on_link_draw_pre);
-    //mods::hook::add_pre<ModelCallback>(on_link_model_callback_pre);
+    mods::hook::add_pre<LinkCreateHeap>(link_create_heap);
 
     constexpr static GfxDrawTypeDesc drawDesc = {
         .struct_size = sizeof(GfxDrawTypeDesc),
@@ -822,24 +818,8 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 
     mods::log::info("Actor ID: {}", ActorGltf::sProcName);
 
-    static constexpr stage_actor_data_class gltfParams{
-        .name = ACTOR_GLTF_NAME,
-        .base =
-            {
-                .parameters = 0,
-                .position = {0.0f, 800.0f, -1800.0f},
-                .angle = {0, 0, 0},
-                .setID = 0xFFFF,
-            },
-    };
-    if (svc_stage->add_actor(mod_ctx, "F_SP103", 1, -1, &gltfParams, sizeof(gltfParams), nullptr) !=
-        MOD_OK)
-    {
-        mods::log::error("Adding gltf to F_SP103 Failed!");
-        return MOD_ERROR;
-    }
-
     checkResult(svc_config->register_var(mod_ctx, &cVarVrmPathDesc, &cVarPathHandle));
+    checkResult(svc_config->register_var(mod_ctx, &cVarVrmScaleDesc, &cVarVrmScaleHandle));
 
     checkResult(mods::hook::add_post<OnPaint>(svc_hook, on_interp_view));
     //checkResult(mods::hook::add_post<OnMenu>(svc_hook, on_menu));
