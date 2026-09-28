@@ -743,9 +743,22 @@ int ActorGltf::IsDelete() {
     return 1;
 }
 
+bool should_draw_actor() {
+    daAlink_c* link = daAlink_getAlinkActorClass();
+    if (!link) {
+        return false;
+    }
+
+    return !link->checkPlayerNoDraw() && !link->checkWolf() && link->mClothesChangeWaitTimer == 0;
+}
+
 int ActorGltf::Execute() {
     daAlink_c* link = daAlink_getAlinkActorClass();
     if (link) {
+        if (!should_draw_actor()) {
+            return 0;
+        }
+
         this->current.pos = link->current.pos;
         this->current.angle = link->current.angle;
     }
@@ -768,7 +781,7 @@ int ActorGltf::Execute() {
 
 int ActorGltf::Draw() {
     daAlink_c* link = daAlink_getAlinkActorClass();
-    if (link && link->checkPlayerNoDraw()) {
+    if (!link || !should_draw_actor()) {
         return 0;
     }
 
