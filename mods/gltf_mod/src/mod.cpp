@@ -20,26 +20,14 @@
 #include "mods/svc/gfx.h"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/log.hpp"
-#include "mods/svc/resource.h"
 #include "mods/svc/stage.h"
 #include "mods/svc/hook.h"
-#include "mods/svc/hook.hpp"
+#include "mods/svc/interp.h"
 
 #include "webgpu/webgpu_cpp.h"
 #include <d/actor/d_a_alink.h>
 
 #include "mods/svc/ui.h"
-
-DEFINE_MOD();
-IMPORT_SERVICE(LogService, svc_log);
-IMPORT_SERVICE(ActorService, svc_actor);
-IMPORT_SERVICE(StageService, svc_stage);
-IMPORT_SERVICE(GfxService, svc_gfx);
-IMPORT_SERVICE(ResourceService, svc_resource);
-IMPORT_SERVICE(CameraService, svc_camera);
-IMPORT_SERVICE(HookService, svc_hook);
-IMPORT_SERVICE(ConfigService, svc_config);
-IMPORT_SERVICE(UiService, svc_ui);
 
 DEFINE_HOOK_SYMBOL("daAlink_modelCallBack", int(J3DJoint* i_joint, int param_1), ModelCallback);
 DEFINE_HOOK_SYMBOL("mDoGph_Painter", int(), OnPaint);
@@ -72,6 +60,21 @@ struct Payload {
     std::vector<GfxRange> skinDataRanges;
     std::vector<GfxRange> materialRanges;
 };
+
+glm::mat4 readInterpMatrix(MtxP source) {
+    Mtx result;
+    if (!svc_interp->lookup_replacement_mtx(source, result)) {
+        return slugcat::gltf::matrix::fromDolphinMtx(source);
+    } else {
+        return slugcat::gltf::matrix::fromDolphinMtx(result);
+    }
+}
+
+glm::mat4 readInterpMatrix(mods::interp::InterpMatrix const& source) {
+    Mtx result;
+    source.readInterpolated(result);
+    return slugcat::gltf::matrix::fromDolphinMtx(result);
+}
 
 GfxDrawTypeHandle gDrawModelCommandType;
 
@@ -311,7 +314,8 @@ void getLocalRotationsRecursive(
         return;
     }
 
-    auto const anmMtx = slugcat::gltf::matrix::fromDolphinMtx(model->getAnmMtx(joint->getJntNo()));
+    auto const anmMtxP = model->getAnmMtx(joint->getJntNo());
+    auto const anmMtx = readInterpMatrix(anmMtxP);
 
     auto const localMtx = glm::inverse(parentMtx) * anmMtx;
 
@@ -344,7 +348,7 @@ std::vector<glm::quat> getLocalRotations(J3DModel* model) {
     return rotations;
 }
 
-void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
+void applyLinkPose(Scene& scene) {
     daAlink_c* link = daAlink_getAlinkActorClass();
     if (!link) {
         return;
@@ -359,10 +363,8 @@ void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
             continue;
         }
 
-        auto& origJoint = *link->mpLinkModel->getModelData()->getJointNodePointer(linkJoint);
-
-        auto const& localRotJoint = localRotations.at(origJoint.getJntNo());
-        auto const& restRotJoint = restRotations.at(origJoint.getJntNo());
+        auto const& localRotJoint = localRotations.at(linkJoint);
+        auto const& restRotJoint = restRotations.at(linkJoint);
 
         auto& entity = scene.get_entity(foundEnt->second);
 
@@ -385,13 +387,13 @@ void applyLinkPose(Scene& scene, ActorGltf& actorGltf) {
 }
 
 void applyTransformsRecursive(
-    Scene& scene, EntityId entity_id, glm::mat4 const& transform, ActorGltf* actorGltf) {
+    Scene& scene, EntityId entity_id, glm::mat4 const& transform) {
     auto& entity = scene.get_entity(entity_id);
     entity.localXform = calcLocalTransform(entity);
     entity.globalXform = transform * entity.localXform;
 
     for (auto child : entity.children) {
-        applyTransformsRecursive(scene, child, entity.globalXform, actorGltf);
+        applyTransformsRecursive(scene, child, entity.globalXform);
     }
 }
 
@@ -642,8 +644,13 @@ FoobarPacket::FoobarPacket() {
 
     pipeline = sDevice.CreateRenderPipeline(&pipelineDesc);
 }
-
 void FoobarPacket::draw() {
+    applyLinkPose(*renderData);
+
+    auto const glmMtx = readInterpMatrix(rootMtx);
+
+    applyTransformsRecursive(*renderData, renderData->root, glmMtx);
+
     auto* payload = new Payload{renderData, pipeline};
 
     auto const& view = *g_dComIfG_gameInfo.play.mCurrentView;
@@ -770,11 +777,7 @@ int ActorGltf::Execute() {
     checkResult(svc_config->get_int(mod_ctx, cVarVrmScaleHandle, &scalePercent));
     mDoMtx_stack_c::scaleM(scale * (scalePercent / 100.0f));
 
-    auto mtx = mDoMtx_stack_c::get();
-    auto glmMtx = slugcat::gltf::matrix::fromDolphinMtx(mtx);
-
-    applyTransformsRecursive(*packet.renderData, packet.renderData->root, glmMtx, this);
-    applyLinkPose(*packet.renderData, *this);
+    packet.rootMtx = mDoMtx_stack_c::get();
 
     return 1;
 }

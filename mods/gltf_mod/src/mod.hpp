@@ -1,6 +1,7 @@
 #pragma once
 
 #include "mods/svc/actor.h"
+#include "mods/svc/interp.hpp"
 
 // Base actor class definitions
 #include "f_op/f_op_actor.h"
@@ -21,6 +22,7 @@ class FoobarPacket final : public J3DPacket {
 public:
     wgpu::RenderPipeline pipeline;
     std::shared_ptr<slugcat::gltf::scene::Scene> renderData;
+    mods::interp::InterpMatrix rootMtx;
 
     FoobarPacket();
     void draw() override;
