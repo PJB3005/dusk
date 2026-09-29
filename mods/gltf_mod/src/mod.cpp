@@ -766,12 +766,8 @@ int ActorGltf::Execute() {
             return 0;
         }
 
-        this->current.pos = link->current.pos;
-        this->current.angle = link->current.angle;
+        mDoMtx_stack_c::concat(link->mpLinkModel->getBaseTRMtx());
     }
-
-    mDoMtx_stack_c::transS(current.pos.x, current.pos.y, current.pos.z);
-    mDoMtx_stack_c::ZXYrotM(shape_angle);
 
     int64_t scalePercent = 100;
     checkResult(svc_config->get_int(mod_ctx, cVarVrmScaleHandle, &scalePercent));
