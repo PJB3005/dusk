@@ -766,7 +766,7 @@ int ActorGltf::Execute() {
             return 0;
         }
 
-        mDoMtx_stack_c::concat(link->mpLinkModel->getBaseTRMtx());
+        mDoMtx_stack_c::copy(link->mpLinkModel->getBaseTRMtx());
     }
 
     int64_t scalePercent = 100;
