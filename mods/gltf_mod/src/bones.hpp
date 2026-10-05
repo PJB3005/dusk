@@ -106,4 +106,31 @@ constexpr u16 kJointRSkirtR2  = 0x22;
 
 }
 
+// clang-format off
+inline std::pair<std::string, u16> const vrmBonesToLinkJoints[]{
+    {vrm::kBoneModRoot,       link::kJointCenter},
+    {vrm::kBoneSpine,         link::kJointBackbone1},
+    {vrm::kBoneChest,         link::kJointBackbone2},
+    {vrm::kBoneNeck,          link::kJointNeck},
+    {vrm::kBoneHead,          link::kJointHead},
+    {vrm::kBoneLeftShoulder,  link::kJointShoulderL},
+    {vrm::kBoneLeftUpperArm,  link::kJointArmL1},
+    {vrm::kBoneLeftLowerArm,  link::kJointArmL2},
+    {vrm::kBoneLeftHand,      link::kJointHandL},
+    {vrm::kBoneRightShoulder, link::kJointShoulderR},
+    {vrm::kBoneRightUpperArm, link::kJointArmR1},
+    {vrm::kBoneRightLowerArm, link::kJointArmR2},
+    {vrm::kBoneRightHand,     link::kJointHandR},
+    {vrm::kBoneHips,          link::kJointWaist},
+    {vrm::kBoneLeftUpperLeg,  link::kJointLegL1},
+    {vrm::kBoneLeftLowerLeg,  link::kJointLegL2},
+    {vrm::kBoneLeftFoot,      link::kJointFootL},
+    {vrm::kBoneLeftToes,      link::kJointToeL},
+    {vrm::kBoneRightUpperLeg, link::kJointLegR1},
+    {vrm::kBoneRightLowerLeg, link::kJointLegR2},
+    {vrm::kBoneRightFoot,     link::kJointFootR},
+    {vrm::kBoneRightToes,     link::kJointToeR},
+};
+// clang-format on
+
 }  // namespace slugcat::gltf::bones

@@ -8,6 +8,7 @@
 #include "ui.hpp"
 
 #include <numbers>
+#include <unordered_set>
 
 #include "bones.hpp"
 #include "helpers/buffer.hpp"
@@ -46,31 +47,6 @@ std::vector<ActorGltf*> gAllActors;
 
 namespace {
 
-// clang-format off
-std::pair<std::string, u16> const vrmBonesToLinkJoints[]{
-    {bones::vrm::kBoneModRoot,       bones::link::kJointCenter},
-    {bones::vrm::kBoneSpine,         bones::link::kJointBackbone1},
-    {bones::vrm::kBoneChest,         bones::link::kJointBackbone2},
-    {bones::vrm::kBoneNeck,          bones::link::kJointNeck},
-    {bones::vrm::kBoneHead,          bones::link::kJointHead},
-    {bones::vrm::kBoneLeftShoulder,  bones::link::kJointShoulderL},
-    {bones::vrm::kBoneLeftUpperArm,  bones::link::kJointArmL1},
-    {bones::vrm::kBoneLeftLowerArm,  bones::link::kJointArmL2},
-    {bones::vrm::kBoneLeftHand,      bones::link::kJointHandL},
-    {bones::vrm::kBoneRightShoulder, bones::link::kJointShoulderR},
-    {bones::vrm::kBoneRightUpperArm, bones::link::kJointArmR1},
-    {bones::vrm::kBoneRightLowerArm, bones::link::kJointArmR2},
-    {bones::vrm::kBoneRightHand,     bones::link::kJointHandR},
-    {bones::vrm::kBoneHips,          bones::link::kJointWaist},
-    {bones::vrm::kBoneLeftUpperLeg,  bones::link::kJointLegL1},
-    {bones::vrm::kBoneLeftLowerLeg,  bones::link::kJointLegL2},
-    {bones::vrm::kBoneLeftFoot,      bones::link::kJointFootL},
-    {bones::vrm::kBoneRightUpperLeg, bones::link::kJointLegR1},
-    {bones::vrm::kBoneRightLowerLeg, bones::link::kJointLegR2},
-    {bones::vrm::kBoneRightFoot,     bones::link::kJointFootR},
-};
-// clang-format on
-
 struct RotationPair {
     glm::quat local = glm::identity<glm::quat>();
     glm::quat global = glm::identity<glm::quat>();
@@ -84,35 +60,44 @@ glm::quat getRotationFromTransformInfo(J3DTransformInfo const& transformInfo) {
     return glm::quat(q.w, q.x, q.y, q.z);
 }
 
-void getRestLocalRotationsRecursive(
-    std::vector<RotationPair>& rotations, glm::quat const& currentRotation, J3DJoint* joint) {
+void getRestLocalRotationsRecursive(std::vector<RotationPair>& rotations,
+    std::unordered_set<u16> const& mappedJoints, glm::quat const& currentRotation,
+    glm::quat const& mergeRotation, J3DJoint* joint) {
     if (!joint) {
         return;
     }
 
-    auto const localRot = getRotationFromTransformInfo(joint->getTransformInfo());
+    auto localRot = getRotationFromTransformInfo(joint->getTransformInfo());
     auto const newCurrent = currentRotation * localRot;
+    auto newMergeRot = glm::identity<glm::quat>();
+
+    localRot = mergeRotation * localRot;
+
+    if (!mappedJoints.contains(joint->getJntNo())) {
+        newMergeRot = localRot;
+    }
 
     rotations.at(joint->getJntNo()) = {localRot, newCurrent};
 
-    getRestLocalRotationsRecursive(rotations, newCurrent, joint->getChild());
+    getRestLocalRotationsRecursive(rotations, mappedJoints, newCurrent, newMergeRot, joint->getChild());
 
     // Tail call 🙏
-    getRestLocalRotationsRecursive(rotations, currentRotation, joint->getYounger());
+    getRestLocalRotationsRecursive(rotations, mappedJoints, currentRotation, mergeRotation, joint->getYounger());
 }
 
-std::vector<RotationPair> getRestRotations(J3DModelData* modelData) {
+std::vector<RotationPair> getRestRotations(
+    std::unordered_set<u16> const& mappedJoints, J3DModelData* modelData) {
     std::vector<RotationPair> rotations;
     rotations.resize(modelData->getJointNum());
 
-    getRestLocalRotationsRecursive(
-        rotations, glm::identity<glm::quat>(), modelData->getJointTree().getRootNode());
+    getRestLocalRotationsRecursive(rotations, mappedJoints, glm::identity<glm::quat>(),
+        glm::identity<glm::quat>(), modelData->getJointTree().getRootNode());
 
     return rotations;
 }
 
-void getLocalRotationsRecursive(std::vector<glm::quat>& rotations, J3DModel* model,
-    glm::mat4 const& parentMtx, J3DJoint* joint) {
+void getLocalRotationsRecursive(std::vector<glm::quat>& rotations, std::unordered_set<u16> const& mappedJoints, J3DModel* model,
+    glm::mat4 const& parentMtx, glm::quat const& mergeRotation, J3DJoint* joint) {
     if (!joint) {
         return;
     }
@@ -122,39 +107,40 @@ void getLocalRotationsRecursive(std::vector<glm::quat>& rotations, J3DModel* mod
 
     auto const localMtx = glm::inverse(parentMtx) * anmMtx;
 
-    glm::vec3 scale;
-    glm::quat rotation;
-    glm::vec3 translation;
-    glm::vec3 skew;
-    glm::vec4 perspective;
+    auto [translation, rotation, scale] = matrix::decompose(localMtx);
 
-    glm::decompose(localMtx, scale, rotation, translation, skew, perspective);
+    auto newMergeRot = glm::identity<glm::quat>();
+    rotation = mergeRotation * rotation;
+
+    if (!mappedJoints.contains(joint->getJntNo())) {
+        newMergeRot = rotation;
+    }
 
     rotations.at(joint->getJntNo()) = rotation;
 
-    getLocalRotationsRecursive(rotations, model, anmMtx, joint->getChild());
+    getLocalRotationsRecursive(rotations, mappedJoints, model, anmMtx, newMergeRot, joint->getChild());
 
     // Tail call 🙏
-    getLocalRotationsRecursive(rotations, model, parentMtx, joint->getYounger());
+    getLocalRotationsRecursive(rotations, mappedJoints, model, parentMtx, mergeRotation, joint->getYounger());
 }
 
-std::vector<glm::quat> getLocalRotations(J3DModel* model) {
+std::vector<glm::quat> getLocalRotations(std::unordered_set<u16> const& mappedJoints, J3DModel* model) {
     std::vector<glm::quat> rotations;
     rotations.resize(model->mModelData->getJointNum());
 
     auto const baseMtx = matrix::fromDolphinMtx(model->getBaseTRMtx());
 
     getLocalRotationsRecursive(
-        rotations, model, baseMtx, model->mModelData->getJointTree().getRootNode());
+        rotations, mappedJoints, model, baseMtx, glm::identity<glm::quat>(), model->mModelData->getJointTree().getRootNode());
 
     return rotations;
 }
 
 void applyLinkPose(daAlink_c const& link, Scene& scene) {
-    auto const localRotations = getLocalRotations(link.mpLinkModel);
-    auto const restRotations = getRestRotations(link.mpLinkModel->getModelData());
+    auto const localRotations = getLocalRotations(scene.mappedLinkJoints, link.mpLinkModel);
+    auto const restRotations = getRestRotations(scene.mappedLinkJoints, link.mpLinkModel->getModelData());
 
-    for (const auto& [humanoidBone, linkJoint] : vrmBonesToLinkJoints) {
+    for (const auto& [humanoidBone, linkJoint] : bones::vrmBonesToLinkJoints) {
         auto const foundEnt = scene.humanoidBones.find(humanoidBone);
         if (foundEnt == scene.humanoidBones.end()) {
             continue;
@@ -197,7 +183,8 @@ void applyLinkRootTranslation(
 
     auto& rootEnt = scene.get_entity(rootFound->second);
     auto parentGlobal = calcParentGlobalTransform(scene, rootEnt);
-    rootEnt.translation = glm::xyz(glm::inverse(parentGlobal) * glm::vec4(offset / _replScale, 1));
+    auto relRootOffset = glm::xyz(glm::inverse(parentGlobal) * glm::vec4(offset / _replScale, 1));
+    rootEnt.translation = rootEnt.referenceTranslation + relRootOffset;
 }
 
 void applyTransformsRecursive(Scene& scene, EntityId entity_id, glm::mat4 const& transform) {

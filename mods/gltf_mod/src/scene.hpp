@@ -4,6 +4,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 #include "glm/ext.hpp"
 #include "glm/ext/matrix_transform.hpp"
@@ -67,6 +68,8 @@ struct Entity {
     glm::quat rotation = glm::identity<glm::quat>();
     glm::vec3 scale = glm::vec3(1.0f);
 
+    glm::vec3 referenceTranslation = {};
+
     glm::quat referenceRotation = glm::identity<glm::quat>();
     glm::quat globalReferenceRotation = glm::identity<glm::quat>();
 
@@ -91,6 +94,7 @@ struct Scene {
     std::vector<EntityId> skinned;
     std::unordered_map<std::string, EntityId> humanoidBones;
     std::vector<std::shared_ptr<Material>> materials;
+    std::unordered_set<u16> mappedLinkJoints;
 
     EntityId root;
     EntityId viewing {};

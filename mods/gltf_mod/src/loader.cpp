@@ -691,6 +691,7 @@ void mapHumanoidBones(LoaderState& state) {
 
 void initRotationsRecursive(scene::Scene& scene, scene::EntityId const entityId, glm::quat rot) {
     auto& entity = scene.get_entity(entityId);
+    entity.referenceTranslation = entity.translation;
     entity.referenceRotation = entity.rotation;
 
     rot = rot * entity.referenceRotation;
@@ -795,18 +796,33 @@ void breakSpine(LoaderState& state) {
     auto& hips = state.scene.get_entity(hipsFound->second);
     auto& spine = state.scene.get_entity(spineFound->second);
 
-    // Do the math so that the spine remains in-place after reparenting.
-    auto const hipsXform = scene::calcLocalTransform(hips);
-    auto const spineXform = hipsXform * scene::calcLocalTransform(spine);
-    setLocalMatrix(spine, spineXform);
+    auto const origHipsXform = scene::calcLocalTransform(hips);
+    auto const origSpineXform = scene::calcLocalTransform(spine);
 
     auto newRootId = state.alloc_entity("structurally superfluous new behind"sv);
+    auto& newRoot = state.scene.get_entity(newRootId);
+
+    newRoot.translation = hips.translation;
+    hips.translation = {};
 
     state.set_parent(newRootId, *hips.parent);
     state.set_parent(hipsFound->second, newRootId);
     state.set_parent(spineFound->second, newRootId);
 
+    // Do the math so that the spine remains in-place after reparenting.
+    auto const spineXform = glm::inverse(scene::calcLocalTransform(newRoot)) * origHipsXform * origSpineXform;
+    setLocalMatrix(spine, spineXform);
+
     state.scene.humanoidBones.emplace(bones::vrm::kBoneModRoot, newRootId);
+}
+
+void calcMappedJoints(scene::Scene& scene) {
+    for (auto const& [name, joint] : bones::vrmBonesToLinkJoints) {
+        if (!scene.humanoidBones.contains(name))
+            continue;
+
+        scene.mappedLinkJoints.insert(joint);
+    }
 }
 
 }  // namespace
@@ -837,6 +853,7 @@ scene::Scene loadScene(char const* path) {
     mapHumanoidBones(state);
     breakSpine(state);
     initRotationsRecursive(state.scene, state.scene.root, glm::identity<glm::quat>());
+    calcMappedJoints(loaded);
 
     //applyDabStraightToForehead(loaded);
 

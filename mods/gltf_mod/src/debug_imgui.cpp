@@ -1,6 +1,7 @@
 #include <numbers>
 
 #include "debug_imgui.hpp"
+#include "helpers/math.hpp"
 #include "helpers/result.hpp"
 #include "imgui.h"
 #include "mod.hpp"
@@ -53,15 +54,27 @@ void show_scene(Scene& scene) {
 
     ImGui::Text("Selected: %s", selected.name.c_str());
 
-    glm::vec3 rotEuler = glm::eulerAngles(selected.rotation) * (180 / std::numbers::pi_v<float>);
+    glm::vec3 rotEuler = glm::eulerAngles(selected.rotation) * helpers::Rad2Deg;
 
     auto const changedTrans = ImGui::InputFloat3("Translation", &selected.translation.x);
     auto const changedRot = ImGui::InputFloat3("Rotation", &rotEuler.x);
     ImGui::InputFloat4("Quat", &selected.rotation.x);
     auto const changedScale = ImGui::InputFloat3("Scale", &selected.scale.x);
 
+    auto [decompTrans, decompRot, decompScale] = matrix::decompose(selected.globalXform);
+    auto decompRotEuler = glm::eulerAngles(decompRot) * helpers::Rad2Deg;
+
+    ImGui::BeginDisabled();
+
+    ImGui::InputFloat3("Global Translation", &decompTrans.x);
+    ImGui::InputFloat3("Global Rotation", &decompRotEuler.x);
+    ImGui::InputFloat4("Global Quat", &decompRot.x);
+    ImGui::InputFloat3("Global Scale", &decompScale.x);
+
+    ImGui::EndDisabled();
+
     if (changedRot) {
-        selected.rotation = glm::quat(rotEuler / (180 / std::numbers::pi_v<float>));
+        selected.rotation = glm::quat(rotEuler * helpers::Deg2Rad);
     }
 
     if (selected.mesh) {
