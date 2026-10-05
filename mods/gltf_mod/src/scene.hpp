@@ -73,6 +73,7 @@ struct Entity {
     glm::mat4 localXform = glm::identity<glm::mat4>();
     glm::mat4 globalXform = glm::identity<glm::mat4>();
 
+    std::optional<EntityId> parent;
     std::vector<EntityId> children;
 
     std::shared_ptr<MeshData> mesh; // Optional
@@ -102,5 +103,9 @@ struct Scene {
         return *entities.at(id);
     }
 };
+
+glm::mat4 calcLocalTransform(Entity const& entity);
+glm::mat4 calcParentGlobalTransform(Scene const& scene, Entity const& entity);
+glm::mat4 calcParentGlobalTransform(Scene const& scene, Entity const& entity, glm::mat4 const& rootXform);
 
 }

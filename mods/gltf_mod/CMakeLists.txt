@@ -15,7 +15,17 @@ endif ()
 
 add_mod(gltf_mod
     FEATURES game fmt webgpu
-    SOURCES  src/mod.cpp src/loader.cpp src/render.cpp src/image_io.cpp src/shader.cpp src/services.cpp
+    SOURCES
+        src/config.cpp
+        src/debug_imgui.cpp
+        src/image_io.cpp
+        src/loader.cpp
+        src/mod.cpp
+        src/render.cpp
+        src/scene.cpp
+        src/services.cpp
+        src/shader.cpp
+        src/ui.cpp
     MOD_JSON mod.json
     RES_DIR  res
     BUNDLE

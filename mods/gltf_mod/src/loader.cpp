@@ -7,6 +7,7 @@
 #include "helpers/hash.hpp"
 #include "helpers/tg3.hpp"
 #include "image_io.hpp"
+#include "bones.hpp"
 #include "render.hpp"
 
 #include <nlohmann/json.hpp>
@@ -17,6 +18,7 @@
 #include "fmt/format.h"
 #include "glm/ext.hpp"
 #include "helpers/buffer.hpp"
+#include "mods/svc/log.hpp"
 #include "tiny_gltf_v3.h"
 
 namespace slugcat::gltf::loader {
@@ -180,6 +182,19 @@ struct LoaderState {
         scene.entities.emplace_back(std::make_unique<scene::Entity>(name));
 
         return id;
+    }
+
+    void set_parent(scene::EntityId entityId, scene::EntityId newParentId) {
+        auto& parent = scene.get_entity(newParentId);
+        auto& child = scene.get_entity(entityId);
+
+        if (child.parent.has_value()) {
+            auto& oldParent = scene.get_entity(*child.parent);
+            collections::remove(oldParent.children, entityId);
+        }
+
+        parent.children.push_back(entityId);
+        child.parent = newParentId;
     }
 
     scene::BufferAccessor load_buffer(int32_t index) {
@@ -458,21 +473,19 @@ glm::quat read_glm_quat(double const (&quat)[4]) {
     };
 }
 
+void setLocalMatrix(scene::Entity& entity, glm::mat4 const& matrix) {
+    auto const [translation, rotation, scale] = matrix::decompose(matrix);
+
+    entity.translation = translation;
+    entity.rotation = rotation;
+    entity.scale = scale;
+}
+
 void applyNodeTransform(scene::Entity& entity, tg3_node const& node) {
     if (node.has_matrix) {
         auto const mtx = read_gltf_matrix(node.matrix);
 
-        glm::vec3 scale;
-        glm::quat rotation;
-        glm::vec3 translation;
-        glm::vec3 skew;
-        glm::vec4 perspective;
-
-        glm::decompose(mtx, scale, rotation, translation, skew, perspective);
-
-        entity.translation = translation;
-        entity.rotation = rotation;
-        entity.scale = scale;
+        setLocalMatrix(entity, mtx);
     } else {
         entity.scale = {node.scale[0], node.scale[1], node.scale[2]};
         entity.rotation = read_glm_quat(node.rotation);
@@ -552,7 +565,7 @@ scene::EntityId convertNode(LoaderState& state, int32_t nodeIdx) {
     applyNodeTransform(entity, node);
 
     for (int c = 0; c < node.children_count; c++) {
-        entity.children.push_back(convertNode(state, node.children[c]));
+        state.set_parent(convertNode(state, node.children[c]), id);
     }
 
     return id;
@@ -753,6 +766,49 @@ void applyDabStraightToForehead(scene::Scene& scene) {
 }
 */
 
+void breakSpine(LoaderState& state) {
+    // Link's spine and hip bone are siblings, whereas VRM expects one to be below the other.
+    // Re-organize the VRM so that it matches link's layout here,
+    // this makes the animation targeting easier.
+
+    // Before:
+    // Hips
+    // \- Spine
+    //
+    // After:
+    // Root
+    // |- Spine
+    // \- Hips
+
+    auto const hipsFound = state.scene.humanoidBones.find(bones::vrm::kBoneHips);
+    if (hipsFound == state.scene.humanoidBones.end()) {
+        mods::log::warn("Hip bone missing? How are you wearing pants?");
+        return;
+    }
+
+    auto const spineFound = state.scene.humanoidBones.find(bones::vrm::kBoneSpine);
+    if (spineFound == state.scene.humanoidBones.end()) {
+        mods::log::warn("Spine bone missing? How are you standing up?");
+        return;
+    }
+
+    auto& hips = state.scene.get_entity(hipsFound->second);
+    auto& spine = state.scene.get_entity(spineFound->second);
+
+    // Do the math so that the spine remains in-place after reparenting.
+    auto const hipsXform = scene::calcLocalTransform(hips);
+    auto const spineXform = hipsXform * scene::calcLocalTransform(spine);
+    setLocalMatrix(spine, spineXform);
+
+    auto newRootId = state.alloc_entity("structurally superfluous new behind"sv);
+
+    state.set_parent(newRootId, *hips.parent);
+    state.set_parent(hipsFound->second, newRootId);
+    state.set_parent(spineFound->second, newRootId);
+
+    state.scene.humanoidBones.emplace(bones::vrm::kBoneModRoot, newRootId);
+}
+
 }  // namespace
 
 scene::Scene loadScene(char const* path) {
@@ -770,17 +826,16 @@ scene::Scene loadScene(char const* path) {
 
     loaded.root = state.alloc_entity(fmt::format("_SceneRoot ({})", tg3_string_view(scene.name)));
 
-    auto& rootEnt = loaded.get_entity(loaded.root);
-
     for (int c = 0; c < scene.nodes_count; c++) {
         auto const& node = scene.nodes[c];
 
-        rootEnt.children.push_back(convertNode(state, node));
+        state.set_parent(convertNode(state, node), loaded.root);
     }
 
     // initMaterials(state);
     initSkins(state);
     mapHumanoidBones(state);
+    breakSpine(state);
     initRotationsRecursive(state.scene, state.scene.root, glm::identity<glm::quat>());
 
     //applyDabStraightToForehead(loaded);

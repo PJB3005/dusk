@@ -1,8 +1,10 @@
 #pragma once
 
-#include "dolphin/mtx.h"
-#include "glm/mat4x4.hpp"
+#include "JSystem/J3DGraphBase/J3DPacket.h"
+#include "glm/glm.hpp"
 #include "mods/svc/gfx.h"
+#include "mods/svc/interp.hpp"
+#include "scene.hpp"
 
 #include "webgpu/webgpu_cpp.h"
 
@@ -30,6 +32,19 @@ struct UniformMaterial {
 
 struct UniformObject {
     glm::mat4 modelMtx;
+};
+
+class FoobarPacket final : public J3DPacket {
+public:
+    wgpu::RenderPipeline pipeline;
+    std::shared_ptr<scene::Scene> scene;
+    std::vector<mods::interp::InterpMatrix> entityMatrices;
+
+    FoobarPacket();
+    void draw() override;
+
+private:
+    [[nodiscard]] glm::mat4 readEntityMatrix(scene::EntityId id) const;
 };
 
 }

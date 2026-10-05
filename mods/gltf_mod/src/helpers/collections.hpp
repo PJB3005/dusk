@@ -18,4 +18,11 @@ constexpr TResult& get_or_new(
     return map.emplace(key, ctor()).first->second;
 }
 
+// https://stackoverflow.com/questions/7631996/remove-an-element-from-a-vector-by-value-c
+template<typename T>
+void remove(std::vector<T> & v, const T & item)
+{
+    v.erase(std::remove(v.begin(), v.end(), item), v.end());
+}
+
 }  // namespace slugcat::gltf::collections

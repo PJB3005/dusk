@@ -5,33 +5,32 @@
 #include "imgui.h"
 #include "loader.hpp"
 #include "mod.hpp"
+#include "ui.hpp"
 
-#include <fstream>
 #include <numbers>
 
+#include "bones.hpp"
 #include "helpers/buffer.hpp"
+#include "helpers/math.hpp"
 #include "render.hpp"
 #include "scene.hpp"
-#include "shader.hpp"
 
 #include "mods/service.hpp"
 #include "mods/svc/actor.hpp"
 #include "mods/svc/camera.h"
-#include "mods/svc/gfx.h"
+#include "mods/svc/hook.h"
 #include "mods/svc/hook.hpp"
 #include "mods/svc/log.hpp"
-#include "mods/svc/stage.h"
-#include "mods/svc/hook.h"
-#include "mods/svc/interp.h"
 
-#include "webgpu/webgpu_cpp.h"
 #include <d/actor/d_a_alink.h>
 
-#include "mods/svc/ui.h"
+#include "config.hpp"
+#include "debug_imgui.hpp"
+#include "helpers/hash.hpp"
+#include "helpers/result.hpp"
+#include "webgpu/webgpu_cpp.h"
 
 DEFINE_HOOK_SYMBOL("daAlink_modelCallBack", int(J3DJoint* i_joint, int param_1), ModelCallback);
-DEFINE_HOOK_SYMBOL("mDoGph_Painter", int(), OnPaint);
-DEFINE_HOOK_SYMBOL("dusk::ImGuiMenuTools::draw", void(), OnMenu);
 
 DEFINE_HOOK(&daAlink_c::createHeap, LinkCreateHeap);
 
@@ -39,228 +38,38 @@ using namespace mods::actor;
 using namespace std::string_view_literals;
 using namespace std::string_literals;
 using namespace slugcat::gltf::scene;
-using namespace slugcat::gltf::render;
+using slugcat::gltf::helpers::checkResult;
 
-extern "C" {
+namespace slugcat::gltf {
 
-extern void* Amogus();
-}
+std::vector<ActorGltf*> gAllActors;
 
 namespace {
 
-UiElementHandle statusText1 = 0;
-UiElementHandle statusText2 = 0;
-
-struct Payload {
-    std::shared_ptr<Scene> scene;
-    wgpu::RenderPipeline pipeline;
-
-    GfxRange uniformGlobalRange;
-    std::vector<GfxRange> uniformObjectRanges;
-    std::vector<GfxRange> skinDataRanges;
-    std::vector<GfxRange> materialRanges;
+// clang-format off
+std::pair<std::string, u16> const vrmBonesToLinkJoints[]{
+    {bones::vrm::kBoneModRoot,       bones::link::kJointCenter},
+    {bones::vrm::kBoneSpine,         bones::link::kJointBackbone1},
+    {bones::vrm::kBoneChest,         bones::link::kJointBackbone2},
+    {bones::vrm::kBoneNeck,          bones::link::kJointNeck},
+    {bones::vrm::kBoneHead,          bones::link::kJointHead},
+    {bones::vrm::kBoneLeftShoulder,  bones::link::kJointShoulderL},
+    {bones::vrm::kBoneLeftUpperArm,  bones::link::kJointArmL1},
+    {bones::vrm::kBoneLeftLowerArm,  bones::link::kJointArmL2},
+    {bones::vrm::kBoneLeftHand,      bones::link::kJointHandL},
+    {bones::vrm::kBoneRightShoulder, bones::link::kJointShoulderR},
+    {bones::vrm::kBoneRightUpperArm, bones::link::kJointArmR1},
+    {bones::vrm::kBoneRightLowerArm, bones::link::kJointArmR2},
+    {bones::vrm::kBoneRightHand,     bones::link::kJointHandR},
+    {bones::vrm::kBoneHips,          bones::link::kJointWaist},
+    {bones::vrm::kBoneLeftUpperLeg,  bones::link::kJointLegL1},
+    {bones::vrm::kBoneLeftLowerLeg,  bones::link::kJointLegL2},
+    {bones::vrm::kBoneLeftFoot,      bones::link::kJointFootL},
+    {bones::vrm::kBoneRightUpperLeg, bones::link::kJointLegR1},
+    {bones::vrm::kBoneRightLowerLeg, bones::link::kJointLegR2},
+    {bones::vrm::kBoneRightFoot,     bones::link::kJointFootR},
 };
-
-glm::mat4 readInterpMatrix(MtxP source) {
-    Mtx result;
-    if (!svc_interp->lookup_replacement_mtx(source, result)) {
-        return slugcat::gltf::matrix::fromDolphinMtx(source);
-    } else {
-        return slugcat::gltf::matrix::fromDolphinMtx(result);
-    }
-}
-
-glm::mat4 readInterpMatrix(mods::interp::InterpMatrix const& source) {
-    Mtx result;
-    source.readInterpolated(result);
-    return slugcat::gltf::matrix::fromDolphinMtx(result);
-}
-
-GfxDrawTypeHandle gDrawModelCommandType;
-
-void bindVertexBuffer(
-    wgpu::RenderPassEncoder const& encoder, BufferAccessor const& buffer, uint32_t slot) {
-    encoder.SetVertexBuffer(slot, buffer.buffer, buffer.offset, buffer.size);
-}
-
-void WawaDrawEntity(wgpu::RenderPassEncoder const& encoder, Payload const& payload,
-    Entity const& entity, wgpu::Buffer const& uniform, wgpu::Buffer const& storage, int meshIdx) {
-    auto const& mesh = *entity.mesh;
-
-    for (auto const& primitive : mesh.primitives) {
-        encoder.SetVertexBuffer(
-            0, primitive.vertex.buffer, primitive.vertex.offset, primitive.vertex.size);
-        encoder.SetVertexBuffer(
-            1, primitive.texCoord.buffer, primitive.texCoord.offset, primitive.texCoord.size);
-
-        if (entity.skinData) {
-            auto const& sharedSkinData = *entity.skinData;
-            if (!primitive.skinData.has_value()) {
-                throw std::runtime_error("Missing skin data on primitive!");
-            }
-
-            auto const& primSkinData = *primitive.skinData;
-
-            bindVertexBuffer(encoder, primSkinData.joints, 2);
-            bindVertexBuffer(encoder, primSkinData.weights, 3);
-        }
-
-        encoder.SetIndexBuffer(primitive.index.buffer,
-            primitive.index.componentType == TG3_COMPONENT_TYPE_UNSIGNED_SHORT ?
-                wgpu::IndexFormat::Uint16 :
-                wgpu::IndexFormat::Uint32,
-            primitive.index.offset, primitive.index.size);
-
-        uint32_t dynamicOffset = payload.uniformObjectRanges[meshIdx].offset;
-        auto const storageRange = payload.skinDataRanges[meshIdx];
-
-        wgpu::BindGroupEntry const entries[]{
-            {
-                .binding = 0,
-                .buffer = uniform,
-                .offset = dynamicOffset,
-                .size = sizeof(UniformObject),
-            },
-            {
-                .binding = 1,
-                .buffer = storage,
-                .offset = storageRange.offset,
-                .size = storageRange.size,
-            },
-        };
-        wgpu::BindGroupDescriptor const bgDesc{
-            .layout = sBindGroupLayoutObject,
-            .entryCount = std::size(entries),
-            .entries = entries,
-        };
-
-        auto bg = sDevice.CreateBindGroup(&bgDesc);
-
-        auto const& matRange = payload.materialRanges[primitive.material->materialId];
-        wgpu::BindGroupEntry const matEntries[]{
-            {
-                .binding = 0,
-                .buffer = uniform,
-                .offset = matRange.offset,
-                .size = matRange.size,
-            },
-            {
-                .binding = 1,
-                .textureView = primitive.material->texture->textureView,
-            },
-            {
-                .binding = 2,
-                .sampler = primitive.material->texture->sampler,
-            },
-        };
-
-        wgpu::BindGroupDescriptor const matDesc{
-            .layout = sBindGroupLayoutMaterial,
-            .entryCount = std::size(matEntries),
-            .entries = matEntries,
-        };
-
-        auto bgMat = sDevice.CreateBindGroup(&matDesc);
-
-        encoder.SetBindGroup(1, bgMat, 0, nullptr);
-        encoder.SetBindGroup(2, bg, 0, nullptr);
-        encoder.DrawIndexed(primitive.index.count, 1, 0, 0);
-    }
-}
-
-void WawaDraw(ModContext*, const GfxDrawContext* draw_ctx, const void* payload_raw,
-    size_t payload_size, void*) {
-    assert(payload_size == sizeof(Payload const*));
-
-    auto* payload = *static_cast<Payload* const*>(payload_raw);
-
-    wgpu::RenderPassEncoder encoder = draw_ctx->pass;
-
-    wgpu::BindGroupEntry const entry{
-        .binding = 0,
-        .buffer = draw_ctx->uniform_buffer,
-        .offset = payload->uniformGlobalRange.offset,
-        .size = payload->uniformGlobalRange.size,
-    };
-    wgpu::BindGroupDescriptor const bindGroupDescriptor{
-        .label = "global"sv,
-        .layout = sBindGroupLayoutGlobal,
-        .entryCount = 1,
-        .entries = &entry,
-    };
-    auto bindGroup = sDevice.CreateBindGroup(&bindGroupDescriptor);
-
-    /*
-    wgpu::BindGroupEntry const entryObject[]{{
-                                                 .binding = 0,
-                                                 .buffer = draw_ctx->uniform_buffer,
-                                                 .offset = 0,
-                                                 .size = sizeof(UniformObject),
-                                             },
-        {
-            .binding = 0,
-            .buffer = draw_ctx->uniform_buffer,
-            .offset = 0,
-            .size = sizeof(UniformObject),
-        }};
-    wgpu::BindGroupDescriptor const bindGroupDescObject{
-        .label = "object"sv,
-        .layout = sBindGroupLayoutObject,
-        .entryCount = std::size(entryObject),
-        .entries = entryObject,
-    };
-    auto const bindGroupObject = sDevice.CreateBindGroup(&bindGroupDescObject);
-    */
-
-    encoder.PushDebugGroup("REAL"sv);
-
-    encoder.SetPipeline(payload->pipeline);
-    encoder.SetBindGroup(0, bindGroup, 0, nullptr);
-
-    int i = 0;
-    for (auto id : payload->scene->meshes) {
-        WawaDrawEntity(encoder, *payload, payload->scene->get_entity(id), draw_ctx->uniform_buffer,
-            draw_ctx->storage_buffer, i);
-        i += 1;
-    }
-
-    encoder.PopDebugGroup();
-
-    delete payload;
-}
-
-void checkResult(ModResult res) {
-    if (res != MOD_OK) {
-        throw std::runtime_error("Service call failed");
-    }
-}
-
-glm::mat4 calcLocalTransform(Entity const& entity) {
-    return glm::translate(entity.translation) * glm::mat4_cast(entity.rotation) *
-           glm::scale(entity.scale);
-}
-
-std::pair<std::string, u16> const vrmBonesToLinkJoints[] {
-    {"spine"s, 0x01}, // backbone1
-    {"chest"s, 0x02}, // backbone2
-    {"neck"s, 0x03},
-    {"head"s, 0x04},
-    {"leftShoulder"s, 0x06},
-    {"leftUpperArm"s, 0x07},
-    {"leftLowerArm"s, 0x08},
-    {"leftHand"s, 0x09},
-    {"rightShoulder"s, 0x0B},
-    {"rightUpperArm"s, 0x0C},
-    {"rightLowerArm"s, 0x0D},
-    {"rightHand"s, 0x0E},
-    {"hips"s, 0x10}, // waist
-    {"leftUpperLeg"s, 0x12},
-    {"leftLowerLeg"s, 0x13},
-    {"leftFoot"s, 0x14},
-    {"rightUpperLeg"s, 0x17},
-    {"rightLowerLeg"s, 0x18},
-    {"rightFoot"s, 0x19},
-};
+// clang-format on
 
 struct RotationPair {
     glm::quat local = glm::identity<glm::quat>();
@@ -269,15 +78,14 @@ struct RotationPair {
 
 glm::quat getRotationFromTransformInfo(J3DTransformInfo const& transformInfo) {
     Quaternion q;
-    JMAEulerToQuat(transformInfo.mRotation.x, transformInfo.mRotation.y, transformInfo.mRotation.z, &q);
+    JMAEulerToQuat(
+        transformInfo.mRotation.x, transformInfo.mRotation.y, transformInfo.mRotation.z, &q);
 
     return glm::quat(q.w, q.x, q.y, q.z);
 }
 
 void getRestLocalRotationsRecursive(
-    std::vector<RotationPair>& rotations,
-    glm::quat const& currentRotation,
-    J3DJoint* joint) {
+    std::vector<RotationPair>& rotations, glm::quat const& currentRotation, J3DJoint* joint) {
     if (!joint) {
         return;
     }
@@ -285,7 +93,7 @@ void getRestLocalRotationsRecursive(
     auto const localRot = getRotationFromTransformInfo(joint->getTransformInfo());
     auto const newCurrent = currentRotation * localRot;
 
-    rotations.at(joint->getJntNo()) = { localRot, newCurrent };
+    rotations.at(joint->getJntNo()) = {localRot, newCurrent};
 
     getRestLocalRotationsRecursive(rotations, newCurrent, joint->getChild());
 
@@ -298,24 +106,19 @@ std::vector<RotationPair> getRestRotations(J3DModelData* modelData) {
     rotations.resize(modelData->getJointNum());
 
     getRestLocalRotationsRecursive(
-        rotations,
-        glm::identity<glm::quat>(),
-        modelData->getJointTree().getRootNode());
+        rotations, glm::identity<glm::quat>(), modelData->getJointTree().getRootNode());
 
     return rotations;
 }
 
-void getLocalRotationsRecursive(
-    std::vector<glm::quat>& rotations,
-    J3DModel* model,
-    glm::mat4 const& parentMtx,
-    J3DJoint* joint) {
+void getLocalRotationsRecursive(std::vector<glm::quat>& rotations, J3DModel* model,
+    glm::mat4 const& parentMtx, J3DJoint* joint) {
     if (!joint) {
         return;
     }
 
     auto const anmMtxP = model->getAnmMtx(joint->getJntNo());
-    auto const anmMtx = readInterpMatrix(anmMtxP);
+    auto const anmMtx = matrix::fromDolphinMtx(anmMtxP);
 
     auto const localMtx = glm::inverse(parentMtx) * anmMtx;
 
@@ -339,23 +142,17 @@ std::vector<glm::quat> getLocalRotations(J3DModel* model) {
     std::vector<glm::quat> rotations;
     rotations.resize(model->mModelData->getJointNum());
 
+    auto const baseMtx = matrix::fromDolphinMtx(model->getBaseTRMtx());
+
     getLocalRotationsRecursive(
-        rotations,
-        model,
-        glm::identity<glm::mat4>(),
-        model->mModelData->getJointTree().getRootNode());
+        rotations, model, baseMtx, model->mModelData->getJointTree().getRootNode());
 
     return rotations;
 }
 
-void applyLinkPose(Scene& scene) {
-    daAlink_c* link = daAlink_getAlinkActorClass();
-    if (!link) {
-        return;
-    }
-
-    auto const localRotations = getLocalRotations(link->mpLinkModel);
-    auto const restRotations = getRestRotations(link->mpLinkModel->getModelData());
+void applyLinkPose(daAlink_c const& link, Scene& scene) {
+    auto const localRotations = getLocalRotations(link.mpLinkModel);
+    auto const restRotations = getRestRotations(link.mpLinkModel->getModelData());
 
     for (const auto& [humanoidBone, linkJoint] : vrmBonesToLinkJoints) {
         auto const foundEnt = scene.humanoidBones.find(humanoidBone);
@@ -368,26 +165,42 @@ void applyLinkPose(Scene& scene) {
 
         auto& entity = scene.get_entity(foundEnt->second);
 
-        auto poseNormalized = restRotJoint.global * glm::inverse(restRotJoint.local) * localRotJoint * glm::inverse(restRotJoint.global);
+        auto poseNormalized = restRotJoint.global * glm::inverse(restRotJoint.local) *
+                              localRotJoint * glm::inverse(restRotJoint.global);
 
-        /*
-        auto const& origTransformInfo = origJoint.getTransformInfo();
-
-        auto origRotation = glm::quat({origTransformInfo.mRotation.x / 32768, origTransformInfo.mRotation.y / 32768, origTransformInfo.mRotation.z / 32768});
-
-        glm::mat4 tposeMtx =
-            slugcat::gltf::matrix::fromDolphinMtx(actorGltf.linkCopyModel->getAnmMtx(linkJoint));
-        glm::mat4 animatedMtx =
-            slugcat::gltf::matrix::fromDolphinMtx(link->mpLinkModel->getAnmMtx(linkJoint));
-        glm::mat4 offsetMtx = tposeMtx * glm::inverse(animatedMtx);
-        auto offsetQuat = glm::toQuat(offsetMtx);*/
-
-        entity.rotation = entity.referenceRotation * glm::inverse(entity.globalReferenceRotation) * poseNormalized * entity.globalReferenceRotation;
+        entity.rotation = entity.referenceRotation * glm::inverse(entity.globalReferenceRotation) *
+                          poseNormalized * entity.globalReferenceRotation;
     }
 }
 
-void applyTransformsRecursive(
-    Scene& scene, EntityId entity_id, glm::mat4 const& transform) {
+void applyLinkRootTranslation(
+    daAlink_c const& link, Scene& scene, glm::mat4 const& replacementBaseMtx) {
+    auto const baseMtx = matrix::fromDolphinMtx(link.mpLinkModel->getBaseTRMtx());
+    auto const rootMtx = matrix::fromDolphinMtx(link.mpLinkModel->getAnmMtx(0));
+    auto const dataOffset = link.mpLinkModel->getModelData()
+                                ->getJointTree()
+                                .getJointNodePointer(0)
+                                ->getTransformInfo()
+                                .mTranslate;
+
+    auto const restTranslatedMtx = baseMtx * glm::translate(helpers::vec(dataOffset));
+
+    auto rootLocal = glm::inverse(restTranslatedMtx) * rootMtx;
+    auto [offset, _rotation, _scale] = matrix::decompose(rootLocal);
+
+    auto const rootFound = scene.humanoidBones.find(bones::vrm::kBoneModRoot);
+    if (rootFound == scene.humanoidBones.end()) {
+        return;
+    }
+
+    auto [_replTrans, _replRot, _replScale] = matrix::decompose(replacementBaseMtx);
+
+    auto& rootEnt = scene.get_entity(rootFound->second);
+    auto parentGlobal = calcParentGlobalTransform(scene, rootEnt);
+    rootEnt.translation = glm::xyz(glm::inverse(parentGlobal) * glm::vec4(offset / _replScale, 1));
+}
+
+void applyTransformsRecursive(Scene& scene, EntityId entity_id, glm::mat4 const& transform) {
     auto& entity = scene.get_entity(entity_id);
     entity.localXform = calcLocalTransform(entity);
     entity.globalXform = transform * entity.localXform;
@@ -397,318 +210,19 @@ void applyTransformsRecursive(
     }
 }
 
-std::vector<glm::mat4> gJointCalcBuffer;
-std::vector<ActorGltf*> actors;
+void recordMatricesForInterp(ActorGltf& actor) {
+    auto const& scene = *actor.scene;
+    auto& dstMatrices = actor.packet.entityMatrices;
 
-void show_entity(Scene& scene, EntityId idx) {
-    ImGui::PushID(idx);
+    dstMatrices.resize(scene.entities.size());
 
-    auto const& ent = scene.get_entity(idx);
-
-    if (ImGui::SmallButton(ent.name.c_str())) {
-        scene.viewing = idx;
+    for (size_t i = 0; i < scene.entities.size(); i++) {
+        auto const& entity = scene.get_entity(i);
+        matrix::toInterpMatrix(entity.globalXform, dstMatrices[i]);
     }
-
-    ImGui::Indent(4);
-
-    for (auto const child : ent.children) {
-        show_entity(scene, child);
-    }
-
-    ImGui::Unindent(4);
-
-    ImGui::PopID();
-}
-
-void show_scene(Scene& scene) {
-    if (ImGui::BeginChild("##tree", ImVec2(300, 0),
-            ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders | ImGuiChildFlags_NavFlattened))
-    {
-        show_entity(scene, scene.root);
-    }
-
-    ImGui::EndChild();
-    ImGui::SameLine();
-
-    ImGui::BeginGroup();
-
-    auto& selected = scene.get_entity(scene.viewing);
-
-    ImGui::Text("Selected: %s", selected.name.c_str());
-
-    glm::vec3 rotEuler = glm::eulerAngles(selected.rotation) * (180 / std::numbers::pi_v<float>);
-
-    auto const changedTrans = ImGui::InputFloat3("Translation", &selected.translation.x);
-    auto const changedRot = ImGui::InputFloat3("Rotation", &rotEuler.x);
-    ImGui::InputFloat4("Quat", &selected.rotation.x);
-    auto const changedScale = ImGui::InputFloat3("Scale", &selected.scale.x);
-
-    if (changedRot) {
-        selected.rotation = glm::quat(rotEuler / (180 / std::numbers::pi_v<float>));
-    }
-
-    if (selected.mesh) {
-        auto const& mesh = selected.mesh;
-        int id = 0;
-        for (auto const& primitive : mesh->primitives) {
-            auto& mat = *primitive.material;
-            ImGui::PushID(id);
-            ImGui::Text("Material: %s", mat.name.c_str());
-            ImGui::ColorEdit4("color", &mat.color.r);
-
-            ImGui::PopID();
-
-            id += 1;
-        }
-    }
-
-    ImGui::EndGroup();
-}
-
-bool active;
-
-void on_interp_view(ModContext*, void*, void*, void*) {
-    ImGui::SetCurrentContext(static_cast<ImGuiContext*>(Amogus()));
-
-    if (ImGui::IsKeyPressed(ImGuiKey_Pause)) {
-        active = !active;
-    }
-
-    if (!active) {
-        return;
-    }
-
-    int idx = 0;
-    for (auto actor : actors) {
-        auto& scene = *actor->packet.renderData;
-        ImGui::PushID(idx);
-        if (ImGui::Begin("Real")) {
-            show_scene(scene);
-        }
-
-        ImGui::End();
-        ImGui::PopID();
-
-        idx += 1;
-    }
-}
-
-constexpr ConfigVarDesc cVarVrmPathDesc {
-    .struct_size = sizeof(cVarVrmPathDesc),
-    .name = "vrm_path",
-    .type = CONFIG_VAR_STRING,
-};
-
-ConfigVarHandle cVarPathHandle;
-
-constexpr ConfigVarDesc cVarVrmScaleDesc{
-    .struct_size = sizeof(cVarVrmScaleDesc),
-    .name = "vrm_scale",
-    .type = CONFIG_VAR_INT,
-    .default_int = 100,
-};
-
-ConfigVarHandle cVarVrmScaleHandle;
-
-ModResult build(ModContext*, UiElementHandle panel, void*, ModError*) {
-    svc_ui->pane_add_section(mod_ctx, panel, "Settings");
-
-    UiControlDesc control1 = UI_CONTROL_DESC_INIT;
-    control1.kind = UI_CONTROL_FILE_PICKER;
-    control1.label = "Path";
-    control1.help_rml = "Path to .vrm";
-    control1.binding = UI_BINDING_CONFIG_VAR;
-    control1.config_var = cVarPathHandle;
-    svc_ui->pane_add_control(mod_ctx, panel, &control1, &statusText1);
-
-    UiControlDesc control2 = UI_CONTROL_DESC_INIT;
-    control2.kind = UI_CONTROL_NUMBER;
-    control2.label = "VRM Scale";
-    control2.help_rml = "Scale of the VRM in the world";
-    control2.binding = UI_BINDING_CONFIG_VAR;
-    control2.config_var = cVarVrmScaleHandle;
-    control2.min = 1;
-    control2.max = 1000;
-    control2.step = 1;
-    svc_ui->pane_add_control(mod_ctx, panel, &control2, &statusText2);
-
-    return MOD_OK;
-}
-
-ModResult update(ModContext*, void*, ModError*) {
-    return MOD_OK;
 }
 
 }  // namespace
-
-FoobarPacket::FoobarPacket() {
-    auto const shaderModule =
-        slugcat::gltf::shader::compileShader("shaders::model", {{"SKINNED", true}});
-
-    static constexpr wgpu::VertexAttribute attr{
-        .format = wgpu::VertexFormat::Float32x3,
-        .shaderLocation = 0,
-    };
-    static constexpr wgpu::VertexAttribute attrTexCoord[]{{
-        .format = wgpu::VertexFormat::Float32x2,
-        .shaderLocation = 1,
-    }};
-    static constexpr wgpu::VertexAttribute attrJoints[]{{
-        .format = wgpu::VertexFormat::Uint16x4,
-        .shaderLocation = 6,
-    }};
-    static constexpr wgpu::VertexAttribute attrWeights[]{{
-        .format = wgpu::VertexFormat::Float32x4,
-        .shaderLocation = 7,
-    }};
-
-    static constexpr wgpu::VertexBufferLayout buffers[]{
-        {
-            .stepMode = wgpu::VertexStepMode::Vertex,
-            .arrayStride = sizeof(cXyz),
-            .attributeCount = 1,
-            .attributes = &attr,
-        },
-        {
-            .stepMode = wgpu::VertexStepMode::Vertex,
-            .arrayStride = sizeof(cXy),
-            .attributeCount = std::size(attrTexCoord),
-            .attributes = attrTexCoord,
-        },
-        {
-            .stepMode = wgpu::VertexStepMode::Vertex,
-            .arrayStride = 8,  // vec4<unsigned short>
-            .attributeCount = std::size(attrJoints),
-            .attributes = attrJoints,
-        },
-        {
-            .stepMode = wgpu::VertexStepMode::Vertex,
-            .arrayStride = 16,  // vec4<float>
-            .attributeCount = std::size(attrWeights),
-            .attributes = attrWeights,
-        },
-    };
-
-    static constexpr wgpu::BlendState blend{
-        .color = {.operation = wgpu::BlendOperation::Add,
-            .srcFactor = wgpu::BlendFactor::SrcAlpha,
-            .dstFactor = wgpu::BlendFactor::OneMinusSrcAlpha},
-        .alpha = {.operation = wgpu::BlendOperation::Add,
-            .srcFactor = wgpu::BlendFactor::One,
-            .dstFactor = wgpu::BlendFactor::One},
-    };
-
-    wgpu::ColorTargetState const targetState = {
-        .format = (wgpu::TextureFormat)sDeviceInfo.color_format,
-        .blend = &blend,
-        .writeMask = wgpu::ColorWriteMask::All,
-    };
-
-    wgpu::FragmentState const fragmentState{
-        .module = shaderModule,
-        .entryPoint = "fs_main"sv,
-        .targetCount = 1,
-        .targets = &targetState,
-    };
-
-    static constexpr wgpu::DepthStencilState depthStencil{
-        .format = wgpu::TextureFormat::Depth32Float,
-        .depthWriteEnabled = WGPUOptionalBool_True,
-        .depthCompare = wgpu::CompareFunction::Greater,
-    };
-
-    auto pipelineDesc = wgpu::RenderPipelineDescriptor{
-        .label = "Wawa"sv,
-        .layout = sPipelineLayout,
-        .vertex =
-            {
-                .module = shaderModule,
-                .entryPoint = "vs_main"sv,
-                .bufferCount = std::size(buffers),
-                .buffers = buffers,
-            },
-        .primitive =
-            {
-                .topology = wgpu::PrimitiveTopology::TriangleList,
-                .frontFace = wgpu::FrontFace::CCW,
-                .cullMode = wgpu::CullMode::Back,
-            },
-        .depthStencil = &depthStencil,
-        .multisample =
-            {
-                .count = 1,
-                .mask = 0xFFFF'FFFF,
-            },
-        .fragment = &fragmentState,
-    };
-
-    pipeline = sDevice.CreateRenderPipeline(&pipelineDesc);
-}
-void FoobarPacket::draw() {
-    applyLinkPose(*renderData);
-
-    auto const glmMtx = readInterpMatrix(rootMtx);
-
-    applyTransformsRecursive(*renderData, renderData->root, glmMtx);
-
-    auto* payload = new Payload{renderData, pipeline};
-
-    auto const& view = *g_dComIfG_gameInfo.play.mCurrentView;
-
-    CameraInfo info{
-        .struct_size = sizeof(CameraInfo),
-    };
-    checkResult(svc_camera->get_camera(mod_ctx, &view, &info));
-
-    UniformGlobal globalUniforms = {};
-    std::memcpy(&globalUniforms.projViewMtx, info.proj_from_world, sizeof(info.proj_from_world));
-
-    checkResult(svc_gfx->push_uniform(
-        mod_ctx, &globalUniforms, sizeof(globalUniforms), &payload->uniformGlobalRange));
-
-    for (auto const meshEnt : renderData->meshes) {
-        auto const& ent = renderData->get_entity(meshEnt);
-
-        UniformObject const object{ent.globalXform};
-
-        auto& objectRange = payload->uniformObjectRanges.emplace_back();
-
-        checkResult(svc_gfx->push_uniform(mod_ctx, &object, sizeof(object), &objectRange));
-    }
-
-    for (auto const skinEntId : renderData->skinned) {
-        auto const& skinEnt = renderData->get_entity(skinEntId);
-        auto const& skinData = *skinEnt.skinData;
-
-        gJointCalcBuffer.resize(skinData.joints.size());
-
-        for (size_t i = 0; i < skinData.joints.size(); ++i) {
-            auto jointEntId = skinData.joints[i];
-            auto const& jointEnt = *renderData->entities[jointEntId];
-
-            gJointCalcBuffer[i] = jointEnt.globalXform * skinData.inverseBindMatrices[i];
-        }
-
-        auto& jointRange = payload->skinDataRanges.emplace_back();
-
-        checkResult(svc_gfx->push_storage(mod_ctx, gJointCalcBuffer.data(),
-            gJointCalcBuffer.size() * sizeof(glm::mat4), &jointRange));
-    }
-
-    for (auto const mat : renderData->materials) {
-        UniformMaterial const matUniform {
-            mat->color,
-        };
-
-        auto& range = payload->materialRanges.emplace_back();
-        checkResult(svc_gfx->push_uniform(mod_ctx, &matUniform, sizeof(matUniform), &range));
-    }
-
-    auto result = svc_gfx->push_draw(mod_ctx, gDrawModelCommandType, &payload, sizeof(payload));
-    if (result != MOD_OK) {
-        svc_log->error(mod_ctx, "Failed to push draw command!");
-    }
-}
 
 HookAction link_create_heap(ModContext*, void* args, void*, void*) {
     fopAcM_Create(ActorGltf::sProcName, 0, 0);
@@ -718,23 +232,23 @@ HookAction link_create_heap(ModContext*, void* args, void*, void*) {
 cPhs_Step ActorGltf::Create() {
     AuroraGXSync();
 
-    scale.setall(150);
-
     size_t length;
-    checkResult(svc_config->get_string(mod_ctx, cVarPathHandle, nullptr, 0, &length));
+    checkResult(svc_config->get_string(mod_ctx, config::cVarPathHandle, nullptr, 0, &length));
     std::string buf;
     buf.resize(length);
-    checkResult(svc_config->get_string(mod_ctx, cVarPathHandle, buf.data(), buf.size() + 1, nullptr));
+    checkResult(svc_config->get_string(
+        mod_ctx, config::cVarPathHandle, buf.data(), buf.size() + 1, nullptr));
 
     try {
-        packet.renderData = std::make_shared<Scene>(
-            slugcat::gltf::loader::loadScene(buf.c_str()));
+        auto loadedScene = std::make_shared<Scene>(loader::loadScene(buf.c_str()));
+        packet.scene = loadedScene;
+        scene = std::move(loadedScene);
     } catch (std::runtime_error const& e) {
         mods::log::error("Failed to load VRM '{}': {}", buf, e.what());
         return cPhs_ERROR_e;
     }
 
-    actors.push_back(this);
+    gAllActors.push_back(this);
 
     fopAcM_setStageLayer(this);
 
@@ -759,21 +273,32 @@ bool should_draw_actor() {
     return !link->checkPlayerNoDraw() && !link->checkWolf() && link->mClothesChangeWaitTimer == 0;
 }
 
+constexpr float kModelScaleFactor = 150;
+
 int ActorGltf::Execute() {
     daAlink_c* link = daAlink_getAlinkActorClass();
-    if (link) {
-        if (!should_draw_actor()) {
-            return 0;
-        }
-
-        mDoMtx_stack_c::copy(link->mpLinkModel->getBaseTRMtx());
+    if (!link) {
+        return 1;
     }
 
-    int64_t scalePercent = 100;
-    checkResult(svc_config->get_int(mod_ctx, cVarVrmScaleHandle, &scalePercent));
-    mDoMtx_stack_c::scaleM(scale * (scalePercent / 100.0f));
+    if (!should_draw_actor()) {
+        return 0;
+    }
 
-    packet.rootMtx = mDoMtx_stack_c::get();
+    mDoMtx_stack_c::copy(link->mpLinkModel->getBaseTRMtx());
+
+    int64_t scalePercent = config::kScaleBase;
+    checkResult(svc_config->get_int(mod_ctx, config::cVarVrmScaleHandle, &scalePercent));
+    auto const scale = kModelScaleFactor * scalePercent / static_cast<float>(config::kScaleBase);
+    mDoMtx_stack_c::scaleM(scale, scale, scale);
+
+    auto const baseMtx = matrix::fromDolphinMtx(mDoMtx_stack_c::get());
+
+    applyLinkPose(*link, *scene);
+    applyLinkRootTranslation(*link, *scene, baseMtx);
+
+    applyTransformsRecursive(*scene, scene->root, baseMtx);
+    recordMatricesForInterp(*this);
 
     return 1;
 }
@@ -790,9 +315,9 @@ int ActorGltf::Draw() {
 }
 
 ActorGltf::~ActorGltf() {
-    auto const pos = std::ranges::find(actors, this);
-    if (pos != actors.end()) {
-        actors.erase(pos);
+    auto const pos = std::ranges::find(gAllActors, this);
+    if (pos != gAllActors.end()) {
+        gAllActors.erase(pos);
     }
 }
 
@@ -807,24 +332,13 @@ ActorProfileDesc const ActorGltf::sProfile = FillInfo<ActorGltf>({
     .cull_type = fopAc_CULLBOX_CUSTOM_e,
 });
 
-extern "C" {
-
-MOD_EXPORT ModResult mod_initialize(ModError*) {
-    slugcat::gltf::render::init();
+ModResult modInit() {
+    debug_imgui::init();
+    render::init();
+    config::init();
+    ui::init();
 
     mods::hook::add_pre<LinkCreateHeap>(link_create_heap);
-
-    constexpr static GfxDrawTypeDesc drawDesc = {
-        .struct_size = sizeof(GfxDrawTypeDesc),
-        .label = "wawa",
-        .draw = &WawaDraw,
-        .user_data = nullptr,
-    };
-    auto result = svc_gfx->register_draw_type(mod_ctx, &drawDesc, &gDrawModelCommandType);
-    if (result != MOD_OK) {
-        mods::log::error("Failed to register draw!");
-        return result;
-    }
 
     if (svc_actor->register_actor(mod_ctx, &ActorGltf::sProfile, &ActorGltf::sProcName,
             &ActorGltf::sActorHandle) != MOD_OK)
@@ -835,17 +349,14 @@ MOD_EXPORT ModResult mod_initialize(ModError*) {
 
     mods::log::info("Actor ID: {}", ActorGltf::sProcName);
 
-    checkResult(svc_config->register_var(mod_ctx, &cVarVrmPathDesc, &cVarPathHandle));
-    checkResult(svc_config->register_var(mod_ctx, &cVarVrmScaleDesc, &cVarVrmScaleHandle));
-
-    checkResult(mods::hook::add_post<OnPaint>(svc_hook, on_interp_view));
-    //checkResult(mods::hook::add_post<OnMenu>(svc_hook, on_menu));
-
-    UiModsPanelDesc panel = UI_MODS_PANEL_DESC_INIT;
-    panel.build = build;
-    checkResult(svc_ui->register_mods_panel(mod_ctx, &panel));
-
     return MOD_OK;
+}
+
+}  // namespace slugcat::gltf
+
+extern "C" {
+MOD_EXPORT ModResult mod_initialize(ModError*) {
+    return slugcat::gltf::modInit();
 }
 
 MOD_EXPORT ModResult mod_update(ModError*) {
