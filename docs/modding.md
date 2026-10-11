@@ -174,6 +174,9 @@ Available features:
 - `webgpu`: Allows importing the WebGPU API
   ([`webgpu/webgpu.h`](https://github.com/webgpu-native/webgpu-headers/blob/main/webgpu.h)). Must be enabled when using
   [GfxService](#gfxservice-modssvcgfxh).
+- `imgui`: Allows usage of Dear ImGui for debug UIs. Due to ABI stability concerns, this feature is *only* available 
+  when building against a local Dusklight build with e.g.
+  `-DDUSKLIGHT_DIR=E:\Projects\dusk -DDUSK_GAME_EXE=E:\Projects\dusk\cmake-build-debug-vcpkg\dusklight_imports.lib` to CMake.
 
 Building produces `my_mod.dusk` in `build/mods/`. Copy the `.dusk` into the user mods folder:
 
@@ -1238,6 +1241,9 @@ svc_game_mode->register_game_mode(mod_ctx, &gameModeDesc);
 
 A service that manages registering and creating custom actors. These actors will be run by the game as if they are part of the engine. These actors can be created by the game either by its 16-bit actor name, or a 7-character long name that can
 be loaded by a stage.
+
+> [!TIP]
+> Much of this boilerplate can be eliminated with the C++ wrapper: `mods/svc/actor.hpp`!
 
 ```cpp
 #include "mods/svc/actor.h"
